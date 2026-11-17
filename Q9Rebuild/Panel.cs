@@ -457,7 +457,7 @@ internal sealed class Q9Panel : Form
             if (engine.Kind == "sym")
             {
                 minus = "button10_pgup.png"; plus = extraButtons ? "button11_pyExtra.png" : "button11_nextpage.png";
-                lines = new[] { "選常用標點符號" }; return;
+                lines = browse; return;   // FUN_1800b0970 選字狀態通用提示 (原版截圖)
             }
             if (engine.Kind == "stroke-count" || engine.Kind == "radical-count" || engine.Kind == "lookup-result")
             {
