@@ -657,7 +657,9 @@ internal sealed class Engine
             }
         // 次數多嘅排前，同次數保持原本次序 (原版逐格向上冒泡)
         var related = counts.Select((p, i) => new { p.Key, p.Value, i }).OrderByDescending(x => x.Value).ThenBy(x => x.i).Select(x => x.Key).ToList();
-        if (related.Count == 0) return related;          // 呢隻字冇關聯字：原版乜都唔顯示
+        // 呢隻字冇關聯字：原版保留之前嘅預設字頁；啱啱開或者轉輸入法之後未出過關聯字就乜都唔顯示
+        if (related.Count == 0)
+            return relActive ? defaults : related;       // 呢度唔對調上下行：你這好喺最底 (原版截圖)
         var page = related.Take(8).ToList();
         foreach (string filler in defaults)
         {
@@ -722,7 +724,11 @@ internal sealed class Engine
     internal void Reset()
     {
         Buf = ""; State = St.Idle; Note = ""; NoChar = false;
-        if (Chinese) SetList("rel", Related(Last), RelMode != 2 && RelMode != 3);
+        if (Chinese)
+        {
+            SetList("rel", Related(Last), RelMode != 2 && RelMode != 3);
+            if (full.Count > 0) relActive = true;
+        }
         else if (Mode == Emoji) OpenEmoji();
         else SetList("", new List<string>(), false);
     }
@@ -740,7 +746,10 @@ internal sealed class Engine
     {
         Reset();
         if (Kind == "rel") SetList("rel", new List<string>(), false);
+        relActive = false;
     }
+
+    private bool relActive;                   // 啟動／轉輸入法之後出過關聯字未
 
     internal void SetMode(int mode) { Mode = mode; ResetQuiet(); }
     internal void SetLang(int lang) { Lang = lang; Last = ""; ResetQuiet(); }
