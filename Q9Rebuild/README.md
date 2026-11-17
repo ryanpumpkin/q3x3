@@ -1,6 +1,17 @@
 # 九方 W10 重建版（第二版）
 
-Windows x64 浮動輸入面板，按原裝九方 W10 專業版 1.1.0.0 嘅 `q9w10b5tsf64.dll` 反編譯結果重寫。需要本機已安裝原版喺 `C:\Program Files\Q9W10B5`：程式執行時由原裝 DLL 讀碼表、由 `SKINready` 讀皮膚，本身唔附帶任何原版資料。`big5hkscs.map` 係公開標準嘅 Big5-HKSCS 對照表，要同 `Q9Rebuild.exe` 放埋一齊。
+Windows x64 浮動輸入面板，按原裝九方 W10 專業版 1.1.0.0 嘅 `q9w10b5tsf64.dll` 反編譯結果重寫。repo 本身唔附帶任何原版資料：程式由原裝 DLL 讀碼表、由 `SKINready` 讀皮膚，呢啲檔案要嚟自本機已安裝嘅原版 `C:\Program Files\Q9W10B5`，可以喺執行時讀，或者喺編譯時內置入 exe。`big5hkscs.map` 係公開標準嘅 Big5-HKSCS 對照表，編譯時已經內置；如果 exe 旁邊有呢個檔案，就會優先用嗰份。
+
+## 內置原版資料（唔使再裝原版）
+
+```powershell
+.\build.ps1 -Embed                                # 由 C:\Program Files\Q9W10B5 讀
+.\build.ps1 -Embed -Install D:\backup\Q9W10B5     # 由其他位置讀
+```
+
+編譯時會核對原裝 DLL 嘅 SHA-256，然後將 `q9w10b5tsf64.dll`、所有大小嘅 `SKINready\default\*\normal` 皮膚、`B5_`／`GB_` 自定範本同 `q9help.chm` 內置入 `Q9Rebuild.exe`（約 37 MB）。之後淨係呢個 exe 就行到，唔使原版資料夾，亦唔使另外放 `big5hkscs.map`。執行時每個檔案都會先搵內置版本，冇先讀安裝目錄。說明書同自定範本會解壓到 `%APPDATA%\Q9Rebuild\original\`。
+
+**呢個 exe 包含九方原版嘅版權資料，只可以自己用，唔好放上 GitHub Releases 或者公開分享。** `.gitignore` 已經排除 `*.exe`。
 
 ## 使用
 
@@ -60,7 +71,7 @@ Windows x64 浮動輸入面板，按原裝九方 W10 專業版 1.1.0.0 嘅 `q9w1
 
 ## 資料同設定位置
 
-- `%APPDATA%\Q9Rebuild\`：設定、最近用字、動態關聯字、輸入記錄、你編輯過嘅自定檔案。
+- `%APPDATA%\Q9Rebuild\`：設定、最近用字、動態關聯字、輸入記錄、你編輯過嘅自定檔案。最近用字同學到嘅關聯字記錄喺 `state.txt`：有改動就每 30 秒寫入一次，關面板時再寫一次；用暫存檔換入，程式死咗最多只會冇咗半分鐘嘅記錄，唔會整壞個檔。
 - 原版 `%APPDATA%\q9\Q9W10\q9data\` 只會讀取，唔會改動。
 
 ## 編譯同驗證

@@ -17,7 +17,7 @@ internal sealed class Settings
     private readonly Dictionary<string, int> values = new Dictionary<string, int>
     {
         { "Mode", 1 }, { "Lang", 0 }, { "Convert", 0 }, { "Size", 300 }, { "Opacity", 100 }, { "KeyMode", 0 },
-        { "RelMode", 2 }, { "Ver", 0 }, { "DirectTopLeft", 1 }, { "HalfPunct", 0 }, { "Radical", 0 }, { "History", 0 },
+        { "RelMode", 2 }, { "Ver", 0 }, { "DirectTopLeft", 1 }, { "HalfPunct", 0 }, { "Radical", 0 }, { "History", 0 }, { "UpdateOrder", 1 },
         { "Top", 0 }, { "ShiftToggle", 1 }, { "ModeNumber", 1 }, { "ModeEmoji", 1 },
         { "On1", 1 }, { "On2", 1 }, { "On3", 1 }, { "On4", 1 }, { "On5", 1 }
     };
@@ -50,15 +50,17 @@ internal sealed class Skin : IDisposable
 {
     private readonly Dictionary<string, Image> images = new Dictionary<string, Image>(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, float> values = new Dictionary<string, float>();
+    private readonly Original files;
     private readonly string dir;
     internal readonly float Width, Height;
 
-    internal Skin(string install, int size)
+    internal Skin(Original files, int size)
     {
-        dir = Path.Combine(install, @"SKINready\default\" + size + @"\normal");
-        if (!File.Exists(Path.Combine(dir, "q9.skin"))) dir = Path.Combine(install, @"SKINready\default\1000\normal");
+        this.files = files;
+        dir = @"SKINready\default\" + size + @"\normal";
+        if (!files.Exists(Path.Combine(dir, "q9.skin"))) dir = @"SKINready\default\1000\normal";
         string section = "";
-        foreach (string input in File.ReadAllLines(Path.Combine(dir, "q9.skin")))
+        foreach (string input in files.ReadAllLines(Path.Combine(dir, "q9.skin")))
         {
             string line = input.Trim();
             if (line.StartsWith("[") && line.EndsWith("]")) section = line.Substring(1, line.Length - 2);
@@ -84,7 +86,9 @@ internal sealed class Skin : IDisposable
         if (!images.TryGetValue(name, out image))
         {
             string file = Path.Combine(dir, name);
-            if (File.Exists(file)) using (var source = Image.FromFile(file)) image = new Bitmap(source);
+            if (files.Exists(file))
+                using (Stream stream = files.Open(file))
+                using (var source = Image.FromStream(stream)) image = new Bitmap(source);
             images[name] = image;
         }
         return image;
@@ -125,6 +129,7 @@ internal sealed class Q9Panel : Form
         engine.SetMode(engine.SupportsMode(settings["Mode"]) ? settings["Mode"] : EnabledChineseModes().First());
         engine.OutputConvert = settings["Convert"] != 0; engine.RelMode = settings["RelMode"];
         engine.HalfPunct = settings["HalfPunct"] != 0; engine.RadicalFirst = settings["Radical"] != 0;
+        engine.UpdateOrder = settings["UpdateOrder"] != 0;
         engine.Output = Deliver;
         engine.Beep = delegate { if (!Capture_) Native.MessageBeep(0); };
         engine.ResetQuiet();
@@ -148,11 +153,25 @@ internal sealed class Q9Panel : Form
     internal void StartHook()
     {
         hook = Native.SetWindowsHookEx(13, hookProc, Native.GetModuleHandle(null), 0);
+        // 每 30 秒將學到嘅關聯字同最近用字寫入 state.txt，程式死咗最多只會冇咗半分鐘
+        saveTimer.Tick += delegate { SaveIfDirty(); };
+        saveTimer.Start();
+    }
+
+    private readonly Timer saveTimer = new Timer { Interval = 30000 };
+
+    private void SaveIfDirty()
+    {
+        if (!engine.StateDirty) return;
+        try { engine.SaveState(); }
+        catch (IOException) { }                  // 寫唔到就下次再試
+        catch (UnauthorizedAccessException) { }
     }
 
     protected override void OnFormClosed(FormClosedEventArgs e)
     {
         if (hook != IntPtr.Zero) Native.UnhookWindowsHookEx(hook);
+        saveTimer.Dispose();
         engine.SaveState();
         base.OnFormClosed(e);
     }
@@ -164,7 +183,7 @@ internal sealed class Q9Panel : Form
     {
         if (skin != null) skin.Dispose();
         int size = settings["Size"];
-        skin = new Skin(data.Install, size);
+        skin = new Skin(data.Files, size);
         int width = size - 1;                                   // 原版 300 設定實際係 299×481
         Image bg = skin.Get("q9.png");
         ClientSize = new Size(width, (int)Math.Round(width * (double)bg.Height / bg.Width));
@@ -280,6 +299,49 @@ internal sealed class Q9Panel : Form
         return code < 0xA140 || (code >= 0xC6A1 && code < 0xC940) || code >= 0xF9D6;
     }
 
+    // FUN_1800b7eb0：拼音有聲母、揀咗單韻母之後，冇複韻母嘅格用灰色 (0xC0C0C1) 填
+    private bool PinyinDisabled(int key)
+    {
+        if (engine.Mode != Engine.Pinyin || engine.State != St.Compose || engine.Buf.Length != 2 || engine.Buf[1] == '0') return false;
+        switch (engine.Buf[1])
+        {
+            // 原版逐格呼叫 FUN_1800b0700：o → 4 5 6；e → 1 2 3 5 6；a → 1 2 5 6 (4 = er / ao 唔會灰)
+            case '4': return key >= 4 && key <= 6;
+            case '5': return key <= 3 || key == 5 || key == 6;
+            case '8': return key == 1 || key == 2 || key == 5 || key == 6;
+        }
+        return false;
+    }
+
+    // 四角三角形 (FUN_1800b55c0)：格內縮 GridLine*，邊長 CornerSize；回傳聲調鍵 7 9 1 3，唔喺角就 '\0'
+    private char CornerOf(RectangleF cell, PointF p)
+    {
+        float s = S, l = skin.Value("UI.GridLineLeft", 4) * s, t = skin.Value("UI.GridLineTop", 5) * s;
+        float r = skin.Value("UI.GridLineRight", 3) * s, b = skin.Value("UI.GridLineBottom", 0) * s;
+        float c = skin.Value("UI.CornerSize", 40) * s;
+        float x = p.X - cell.X, y = p.Y - cell.Y, w = cell.Width;
+        if (x >= l && y >= t && (x - l) + (y - t) <= c) return '7';
+        if (x <= w - r && y >= t && (w - r - x) + (y - t) <= c) return '9';
+        if (x >= l && y <= w - b && (x - l) + (w - b - y) <= c) return '1';
+        if (x <= w - r && y <= w - b && (w - r - x) + (w - b - y) <= c) return '3';
+        return '\0';
+    }
+
+    // 「點擊左上角的字直接上字」範圍 (碼 0x1100)：靜止時係格內縮後嘅左上半格三角形 (FUN_1800b55c0)；
+    // 筆劃、粵拼取碼時係成格嘅左上半三角形 (FUN_1800bf150 / FUN_1800b90f0)
+    private bool InTopLeftHalf(RectangleF cell, PointF p, bool compose)
+    {
+        float s = S, x = p.X - cell.X, y = p.Y - cell.Y, w = cell.Width;
+        float l = 0, t = 0, r = 0, b = 0;
+        if (!compose)
+        {
+            l = skin.Value("UI.GridLineLeft", 4) * s; t = skin.Value("UI.GridLineTop", 5) * s;
+            r = skin.Value("UI.GridLineRight", 3) * s; b = skin.Value("UI.GridLineBottom", 0) * s;
+        }
+        float spanX = w - r - l, spanY = w - b - t;
+        return x >= l && y >= t && spanX > 0 && spanY > 0 && (x - l) / spanX + (y - t) / spanY <= 1;
+    }
+
     private void PageLabels(out string key0, out string dot, out string minus, out string plus, out string[] lines)
     {
         bool select = engine.State == St.Select, compose = engine.State == St.Compose;
@@ -295,14 +357,32 @@ internal sealed class Q9Panel : Form
             return;
         }
         if (engine.Kind == "emojicat") { key0 = "標點"; return; }
+        // FUN_18000c5e0：筆劃、字形有「補碼」(選單 Pinyin / Shape Search) 時，取碼同選字嘅「+」係補音；
+        // 「−」喺數字碼第一頁 (FUN_1800ad920) 係字形檢字，其他 (關聯字、標點、後頁) 係上頁。
+        bool extraButtons = mode == Engine.Stroke || mode == Engine.Glyph;
         if (select)
         {
             if (engine.Kind == "lookup-menu") { lines = new[] { "選檢字方法" }; return; }
-            if (engine.Kind == "shape-extra") { lines = new[] { "選字形結構" }; return; }
-            if (engine.Kind == "sound-extra") { key0 = "姓氏"; lines = new[] { "請選字的聲母作補音", "或按０選姓氏／外字" }; return; }
+            // 補碼第一步：字形 ('E') 兩邊都係空白掣，補音 ('e') 左邊係上頁
+            if (engine.Kind == "shape-extra") { minus = "button10_blank.png"; plus = "button11_blank.png"; lines = new[] { "選字形結構" }; return; }
+            if (engine.Kind == "sound-extra")
+            {
+                minus = "button10_pgup.png"; plus = "button11_blank.png";
+                key0 = "姓氏"; lines = new[] { "請選字的聲母作補音", "或按０選姓氏／外字" }; return;
+            }
             key0 = "下頁";
-            if (engine.Kind == "punct") { key0 = "符號"; return; }
-            if (engine.Kind == "sym") { lines = new[] { "選常用標點符號" }; return; }
+            // 標點頁 ('P' 一碼) 對原版係取碼狀態：筆劃字形顯示上頁 + 補音，其他輸入法顯示常用字句 + 詞語
+            if (engine.Kind == "punct")
+            {
+                key0 = "下頁";     // FUN_1800b0970 'P'：0 鍵標籤「下　頁」(按 0 = 入 PUNDATA 第 9 組)
+                if (extraButtons) { minus = "button10_pgup.png"; plus = "button11_pyExtra.png"; }
+                return;
+            }
+            if (engine.Kind == "sym")
+            {
+                minus = "button10_pgup.png"; plus = extraButtons ? "button11_pyExtra.png" : "button11_nextpage.png";
+                lines = new[] { "選常用標點符號" }; return;
+            }
             if (engine.Kind == "stroke-count" || engine.Kind == "radical-count" || engine.Kind == "lookup-result")
             {
                 minus = "button10_pgup.png"; plus = "button11_nextpage.png";
@@ -338,20 +418,40 @@ internal sealed class Q9Panel : Form
                     return;
                 case Engine.Stroke:
                     minus = "button10_shapeExtra.png"; plus = "button11_pyExtra.png";
-                    key0 = "選字";
-                    lines = n == 1 ? new[] { "常用字﹕按０選字", "獨體字﹕左邊第二筆" } : new[] { "常用字﹕按０選字", "分體字﹕右邊第一筆" };
+                    // FUN_1800bf820：有預覽字就係「選字」+ 兩行提示 (唔理第幾碼)；冇預覽字就同靜止時一樣
+                    if (engine.HasPreview)
+                    {
+                        key0 = "選字";
+                        lines = new[] { "常用字﹕按０選字", "獨體字﹕左邊第二筆" };
+                    }
+                    else
+                    {
+                        key0 = "標點";
+                        lines = new[] { "獨體字﹕順序第一二筆", "分體字﹕左邊頭兩筆", "　　　　右邊第一筆" };
+                    }
                     return;
                 case Engine.Pinyin:
-                    if (n == 1) lines = new[] { "請選擇韻母分類" };
-                    else if (n == 2) { key0 = "確定"; lines = new[] { "請選擇韻母", "按０確定" }; }
-                    else { key0 = "所有"; lines = new[] { "請選擇聲調", "按０顯示所有字" }; }
+                    // FUN_1800b7eb0：第一碼 0 鍵「韻母組合」(聲母 1 3 5 冇)；冇聲母 e 第二碼「下頁」
+                    if (n == 1) { key0 = "135".IndexOf(engine.Buf[0]) < 0 ? "韻母組合" : ""; lines = new[] { "請選擇韻母分類" }; }
+                    else if (n == 2)
+                    {
+                        key0 = engine.Buf[1] != '0' ? "確定" : engine.Buf[0] == '9' ? "下頁" : "";
+                        lines = new[] { "請選擇韻母", "按０確定" };
+                    }
+                    else { key0 = "所有字"; lines = new[] { "請選擇聲調", "按０顯示所有字" }; }
                     return;
                 case Engine.Zhuyin:
-                    key0 = "確定";
-                    lines = n == 1 ? new[] { "請選擇介音或韻母", "只有聲母按０確定" } : new[] { "請選擇韻母", "按０確定" };
+                    // FUN_1800bac70：只有「冇聲母」(0) 時 0 鍵係檢字
+                    if (n == 1 && engine.Buf == "0") { key0 = "檢字"; lines = new[] { "請選擇介音或韻母", "按省略號選其他" }; }
+                    else
+                    {
+                        key0 = "確定";
+                        lines = n == 1 ? new[] { "請選擇介音或韻母", "只有聲母按０確定" } : new[] { "請選擇韻母", "如漢字沒韻母按０確定" };
+                    }
                     return;
                 case Engine.Canton:
-                    key0 = "選字";
+                    // FUN_1800b9790：取碼時冇提示行；冇預覽字 0 鍵係「標點」
+                    key0 = engine.HasPreview ? "選字" : "標點";
                     return;
             }
             return;
@@ -367,7 +467,7 @@ internal sealed class Q9Panel : Form
             case Engine.Stroke: lines = new[] { "獨體字﹕順序第一二筆", "分體字﹕左邊頭兩筆", "　　　　右邊第一筆" }; break;
             case Engine.Pinyin: lines = new[] { "請選擇聲母", "如漢字沒聲母選韻母分類" }; break;
             case Engine.Zhuyin: lines = new[] { "請選擇聲母", "如漢字沒聲母按０" }; break;
-            case Engine.Canton: lines = new[] { "請選擇字母" }; break;
+            case Engine.Canton: lines = new[] { "請順序輸入拼音", "按０確定" }; break;   // FUN_1800b9790
         }
     }
 
@@ -419,7 +519,8 @@ internal sealed class Q9Panel : Form
             for (int key = 1; key <= 9; key++)
             {
                 bool blank = select && engine.Cand[key - 1] == null
-                    || key == 7 && (image == "PY0.png" || image == "PYREL.png" || image == "PYNONE.png");
+                    || key == 7 && (image == "PY0.png" || image == "PYREL.png" || image == "PYNONE.png")
+                    || PinyinDisabled(key);
                 if (blank) g.FillRectangle(empty, Cell(key));
             }
             if (image != null)
@@ -495,8 +596,18 @@ internal sealed class Q9Panel : Form
             int baseY = (int)z.Y + (int)(adjV * s) + relatedBaseline;
             var label = Engine.Elements(key0);
             float key0Adj = skin.Value("UI.Key0AdjustH", -20);
-            if (label.Count > 0) Gdi.Text(hdc, label[0], face, big, Color.Black, (int)z.X + (int)((adjH + key0Adj) * s), baseY);
-            if (label.Count > 1) Gdi.Text(hdc, label[1], face, big, Color.Black, (int)z.X + CellPx + (int)(adjH * s) - 1, baseY);
+            int x0 = (int)z.X + (int)((adjH + key0Adj) * s), x1 = (int)z.X + CellPx + (int)(adjH * s) - 1;
+            if (label.Count == 4)
+                // 「韻母組合」：原版用 0.6 倍字體一次過畫 (FUN_1800b7eb0)
+                Gdi.Text(hdc, key0, face, (int)(big * 0.6), Color.Black, x0, baseY);
+            else if (label.Count == 3)
+                // 「所有字」：原版同「確　定」一樣由第一隻字位置連續畫，每字一個全形位
+                for (int i = 0; i < 3; i++) Gdi.Text(hdc, label[i], face, big, Color.Black, x0 + (x1 - x0) * i / 2, baseY);
+            else
+            {
+                if (label.Count > 0) Gdi.Text(hdc, label[0], face, big, Color.Black, x0, baseY);
+                if (label.Count > 1) Gdi.Text(hdc, label[1], face, big, Color.Black, x1, baseY);
+            }
             if (dot == "標點" || dot == "韻母") Gdi.Text(hdc, dot, face, Pt(57), Color.Black, (int)DotKey.X + (int)(4 * s), (int)DotKey.Y + (int)(101 * s) + relatedBaseline);
             else if (dot == ".") Gdi.Text(hdc, dot, face, big, Color.Black, (int)(DotKey.X + adjH * s), baseY);
 
@@ -775,8 +886,16 @@ internal sealed class Q9Panel : Form
             {
                 RectangleF cell = Cell(key);
                 if (!cell.Contains(p)) continue;
-                bool corner = p.X < cell.X + cell.Width * 0.42f && p.Y < cell.Y + cell.Height * 0.42f;
+                bool corner = InTopLeftHalf(cell, p, engine.State == St.Compose);
                 if (engine.Mode == Engine.Number) Native.Type(key.ToString());
+                else if (engine.State == St.Compose && (engine.Mode == Engine.Pinyin || engine.Mode == Engine.Zhuyin))
+                {
+                    char tone = CornerOf(cell, p);
+                    // FUN_1800b4de0：「點擊左上角的字直接上字」關閉時，取碼區碼會 & 0xEEFF
+                    // (左上變中間、左下變右上)，同原版一樣照做
+                    if (settings["DirectTopLeft"] == 0) tone = tone == '7' ? '\0' : tone == '1' ? '9' : tone;
+                    engine.MouseKey((char)('0' + key), tone);
+                }
                 else if (!(corner && settings["DirectTopLeft"] != 0 && engine.PickSmall(key - 1))) engine.Key((char)('0' + key));
                 break;
             }
@@ -850,6 +969,7 @@ internal sealed class Q9Panel : Form
         keys.Add(new ToolStripSeparator());
         Toggle(keys, "按 Shift 隱藏／重現九方", "ShiftToggle", null);
         Toggle(root, "有部首用部首－不用兼容碼（筆劃輸入）", "Radical", delegate { engine.RadicalFirst = settings["Radical"] != 0; engine.Reset(); });
+        Toggle(root, "輸入過的字自動調前", "UpdateOrder", delegate { engine.UpdateOrder = settings["UpdateOrder"] != 0; });
         var related = Item(root, "設定關聯字", false, null).DropDownItems;
         string[] relNames = { "固定關聯字", "固定＋自定關聯字", "動態關聯字", "關閉關聯字" };
         for (int i = 0; i < relNames.Length; i++)
@@ -884,8 +1004,8 @@ internal sealed class Q9Panel : Form
 
     private void OpenHelp()
     {
-        string chm = Path.Combine(data.Install, "q9help.chm");
-        if (File.Exists(chm)) Process.Start("hh.exe", "\"" + chm + "\"");
+        if (!data.Files.Exists("q9help.chm")) return;
+        Process.Start("hh.exe", "\"" + data.Files.FilePath("q9help.chm") + "\"");
     }
 
     protected override void Dispose(bool disposing)
@@ -1115,6 +1235,17 @@ internal static class Program
         var sent = new List<string>();
         engine.Output = sent.Add;
         engine.RelMode = 0;
+        engine.UpdateOrder = false;      // 唔好俾調前改咗後面測試用嘅次序
+        // 自動調前 (FUN_1800bc630)：筆劃揀第 13 個字，搬去第 9 格，第 9 至 12 個順次後移
+        {
+            var copy = new Tbl((byte[])data.Table(0, "STIMDATA").Bytes.Clone());
+            var before = copy.Get(55);
+            Check(copy.Promote(55, before[12], 8), "自動調前");
+            var after = copy.Get(55);
+            Check(after[8] == before[12] && after.Skip(9).Take(4).SequenceEqual(before.Skip(8).Take(4))
+                && after.Take(8).SequenceEqual(before.Take(8)) && after.Skip(13).SequenceEqual(before.Skip(13)), "自動調前次序");
+            Check(!copy.Promote(55, after[3], 8), "第一頁嘅字唔調");
+        }
         // 原版筆劃上文預測唔會將頭六個常規候選移到預測字區。
         engine.Last = "十";
         Keys(engine, "940");
@@ -1132,7 +1263,23 @@ internal static class Program
         Keys(engine, "710"); engine.Key((char)('1' + Array.IndexOf(engine.Cand, "志")));
         Check(sent.Last() == "志" && engine.State == St.Idle && engine.Kind == "rel" && engine.Cand.Count(c => c != null) == 9, "關聯字");
         string top = engine.Cand[6];
-        Keys(engine, "07"); Check(sent.Last() == top, "選關聯字");
+        // 關聯字頁揭到尾再按「0」返第一頁 (FUN_1800be2e0 參數 3)，唔會入標點
+        Keys(engine, "0");
+        string[] firstRel = (string[])engine.Cand.Clone();
+        for (int i = 0; i < engine.Pages; i++) engine.Key('0');
+        Check(engine.Kind == "rel" && engine.State == St.Select && engine.Page == 1 && engine.Cand.SequenceEqual(firstRel), "關聯字揭完返第一頁");
+        Keys(engine, ".07"); Check(sent.Last() == top, "選關聯字");
+        // 預測字：第一頁最多 3 個，第 4 個起放第二頁最前 (FUN_1800c0650)
+        {
+            var code = Enumerable.Range(0, 20).Select(i => "c" + i).ToList();
+            var pred = Enumerable.Range(0, 5).Select(i => "p" + i).ToList();
+            var m = typeof(Engine).GetMethod("WithPrediction", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static);
+            var r = (List<string>)m.Invoke(null, new object[] { code, pred });
+            Check(r.Take(9).SequenceEqual(code.Take(6).Concat(pred.Take(3))) && r.Skip(9).Take(2).SequenceEqual(pred.Skip(3))
+                && r.Skip(11).SequenceEqual(code.Skip(6)), "預測字第二頁");
+            r = (List<string>)m.Invoke(null, new object[] { code.Take(5).ToList(), pred });
+            Check(r.SequenceEqual(code.Take(5).Concat(pred.Take(3))), "預測字常規候選唔夠一頁");
+        }
         // 標點：冇關聯字時「0」直接入標點頁
         engine.RelMode = 3; engine.Reset();
         Keys(engine, "0"); Check(engine.Kind == "punct" && engine.Image == "Q9_P.png", "標點頁");
@@ -1163,6 +1310,10 @@ internal static class Program
         Keys(engine, "9"); Check(engine.Cand.Contains("時") && !engine.Cand.Contains("是"), "拼音 時");
         Keys(engine, ".362"); Check(engine.State == St.Compose && engine.Image == "PY40.png", "拼音 362 等候聲調");
         Keys(engine, "7"); Check(engine.State == St.Select && engine.Buf == "3624", "拼音 362 第一聲");
+        // 滑鼠：第二碼點中間 = 所有聲調，唔會停低問聲調；點左上角 = 第一聲
+        Keys(engine, ".36"); engine.MouseKey('2', '\0'); Check(engine.State == St.Select && engine.Buf == "3625", "拼音滑鼠中間唔問聲調");
+        Keys(engine, ".36"); engine.MouseKey('2', '7'); Check(engine.State == St.Select && engine.Buf == "3624", "拼音滑鼠左上第一聲");
+        Keys(engine, ".1"); engine.MouseKey('8', '9'); Check(engine.Buf == "1808", "拼音滑鼠單韻母角落");
         Keys(engine, ".808"); Check(engine.Cand.Contains("安"), "拼音 安");
         Keys(engine, ".80"); Check(engine.Kind == "pyhint" && engine.Cand[4] == "啊", "拼音 a 單字");
         Keys(engine, "5"); Check(sent.Last() == "啊", "拼音 上 啊");
@@ -1173,6 +1324,7 @@ internal static class Program
         engine.SetMode(Engine.Zhuyin);
         Keys(engine, "370"); Check(engine.Cand.Contains("西"), "注音 西");
         Keys(engine, ".11"); Check(engine.Cand.Contains("找"), "注音 找");
+        Keys(engine, ".1"); engine.MouseKey('1', '3'); Check(engine.State == St.Select && engine.Buf == "1016", "注音滑鼠右下第三聲");
         engine.SetMode(Engine.Zhuyin);
         Keys(engine, "00"); Check(engine.Kind == "lookup-menu", "注音 00 開啟檢字方法");
         Keys(engine, ".");

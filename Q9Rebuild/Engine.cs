@@ -59,10 +59,21 @@ internal static class Dbcs
     private static readonly Dictionary<int, string> Hkscs = new Dictionary<int, string>();
     private static Dictionary<string, int> hkscsReverse;
 
+    // 優先用 exe 旁邊嘅 big5hkscs.map，冇就用編譯時內置嗰份。
     internal static void LoadHkscs(string path)
     {
-        if (!File.Exists(path)) return;
-        foreach (string line in File.ReadAllLines(path))
+        IEnumerable<string> lines;
+        if (File.Exists(path)) lines = File.ReadAllLines(path);
+        else
+        {
+            Stream embedded = typeof(Dbcs).Assembly.GetManifestResourceStream("big5hkscs.map");
+            if (embedded == null) return;
+            var list = new List<string>();
+            using (var reader = new StreamReader(embedded))
+                for (string l; (l = reader.ReadLine()) != null; ) list.Add(l);
+            lines = list;
+        }
+        foreach (string line in lines)
         {
             int sp = line.IndexOf(' ');
             if (sp != 4) continue;
@@ -125,6 +136,20 @@ internal sealed class Tbl
 
     private int Idx(int k) { return d[k * 2] | d[k * 2 + 1] << 8; }
     internal bool IsComponent(string s) { return s.Length == 1 && s[0] >= 0xE000 && s[0] < 0xE020; }
+    internal byte[] Bytes { get { return d; } }
+
+    // 輸入過的字自動調前 (FUN_1800bc630)：揀咗位置 > target 嘅字，搬去 target，中間嘅字順次後移一格。
+    internal bool Promote(int code, string ch, int target)
+    {
+        int pos = Get(code).IndexOf(ch);
+        if (pos <= target) return false;
+        int from = n * 2 + Idx(code) * 2 + target * elem, at = from + (pos - target) * elem;
+        var moved = new byte[elem];
+        Buffer.BlockCopy(d, at, moved, 0, elem);
+        Buffer.BlockCopy(d, from, d, from + elem, at - from);
+        Buffer.BlockCopy(moved, 0, d, from, elem);
+        return true;
+    }
 
     internal List<string> Get(int code)
     {
@@ -193,9 +218,96 @@ internal sealed class RelTable
     }
 }
 
+// 原版檔案來源。build.ps1 -Embed 會將本機原版檔案編譯入 exe，資源名係 "Q9/" + 相對路徑；
+// 逐個檔案先搵內置，冇就讀安裝目錄。
+internal sealed class Original
+{
+    private const string Prefix = "Q9/";
+    private static readonly System.Reflection.Assembly Self = typeof(Original).Assembly;
+    private readonly Dictionary<string, string> embedded = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+    internal readonly string Install, Cache;
+
+    internal Original(string install, string cache)
+    {
+        Install = install;
+        Cache = cache;
+        foreach (string name in Self.GetManifestResourceNames())
+            if (name.StartsWith(Prefix, StringComparison.Ordinal)) embedded[name.Substring(Prefix.Length)] = name;
+    }
+
+    internal bool HasEmbedded { get { return embedded.Count > 0; } }
+
+    private static string Key(string relative) { return relative.Replace('\\', '/').TrimStart('/'); }
+
+    internal bool Exists(string relative)
+    {
+        return embedded.ContainsKey(Key(relative)) || File.Exists(Path.Combine(Install, relative));
+    }
+
+    internal Stream Open(string relative)
+    {
+        string name;
+        if (embedded.TryGetValue(Key(relative), out name)) return Self.GetManifestResourceStream(name);
+        return File.OpenRead(Path.Combine(Install, relative));
+    }
+
+    internal byte[] ReadAllBytes(string relative)
+    {
+        using (Stream s = Open(relative))
+        using (var copy = new MemoryStream())
+        {
+            s.CopyTo(copy);
+            return copy.ToArray();
+        }
+    }
+
+    internal string[] ReadAllLines(string relative)
+    {
+        var lines = new List<string>();
+        using (var reader = new StreamReader(Open(relative), Encoding.UTF8, true))
+            for (string line; (line = reader.ReadLine()) != null; ) lines.Add(line);
+        return lines.ToArray();
+    }
+
+    // 要交俾外部程式 (hh.exe) 或者沿用檔案路徑嘅地方：內置檔案解壓到 Cache 再回傳路徑。
+    internal string FilePath(string relative)
+    {
+        string name;
+        if (!embedded.TryGetValue(Key(relative), out name)) return Path.Combine(Install, relative);
+        string target = Path.Combine(Cache, relative);
+        byte[] bytes = ReadAllBytes(relative);
+        if (Same(target, bytes)) return target;
+        Directory.CreateDirectory(Path.GetDirectoryName(target));
+        // 每個程序用自己嘅暫存檔；同時開兩個 exe 都唔會撞
+        string temp = target + "." + Guid.NewGuid().ToString("N") + ".tmp";
+        try
+        {
+            File.WriteAllBytes(temp, bytes);
+            if (File.Exists(target)) File.Replace(temp, target, null); else File.Move(temp, target);
+        }
+        catch (IOException)
+        {
+            // 另一個程序啱啱寫好，或者檔案開緊 (例如 hh.exe 開住說明書)：有舊檔照用
+            if (!File.Exists(target)) throw;
+        }
+        finally { if (File.Exists(temp)) File.Delete(temp); }
+        return target;
+    }
+
+    private static bool Same(string path, byte[] bytes)
+    {
+        var info = new FileInfo(path);
+        if (!info.Exists || info.Length != bytes.Length) return false;
+        byte[] current = File.ReadAllBytes(path);
+        for (int i = 0; i < bytes.Length; i++) if (current[i] != bytes[i]) return false;
+        return true;
+    }
+}
+
 internal sealed class Q9Data
 {
-    internal readonly string Install, UserDir;
+    internal readonly string UserDir;
+    internal readonly Original Files;
     private readonly Dictionary<string, byte[]> res;
     private readonly Dictionary<string, Tbl> tables = new Dictionary<string, Tbl>();
     private readonly Dictionary<string, RelTable> rels = new Dictionary<string, RelTable>();
@@ -203,9 +315,11 @@ internal sealed class Q9Data
 
     internal Q9Data(string install, string userDir)
     {
-        Install = install;
         UserDir = userDir;
-        byte[] image = File.ReadAllBytes(Path.Combine(install, "q9w10b5tsf64.dll"));
+        Files = new Original(install, Path.Combine(userDir, "original"));
+        if (!Files.Exists("q9w10b5tsf64.dll"))
+            throw new FileNotFoundException("搵唔到原版九方檔案：呢個 exe 冇內置原版資料，而且 " + install + " 冇安裝原版。");
+        byte[] image = Files.ReadAllBytes("q9w10b5tsf64.dll");
         using (var sha = System.Security.Cryptography.SHA256.Create())
             if (BitConverter.ToString(sha.ComputeHash(image)).Replace("-", "") != DllHash)
                 throw new InvalidDataException("原裝 DLL 版本與已分析版本不符。");
@@ -303,6 +417,20 @@ internal sealed class Q9Data
 
     internal static string Prefix(int lang) { return lang == 0 ? "B5_" : "GB_"; }
 
+    // FUN_1800c9de0：主碼表先讀資源，q9data 有同名 .tbl 就用檔案 (原版「自動調前」改過嘅次序就喺呢度)。
+    // 重建版自己調過嘅次序寫入 UserDir，唔改原版檔案；載入次序：重建版副本 → 原版副本 → DLL 資源。
+    private static readonly Dictionary<string, string> UserTableFiles = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+    {
+        { "STIMDATA", "q9stb" }, { "STIMDATA2", "q9stb2" }, { "Q9DATA", "q9b" }, { "Q9DATA_TS", "q9b_ts" },
+        { "PYDATA", "q9x2pyb" }, { "CYDATA", "q9x2cyb" }, { "CT_PYDATA", "q9xpctb" }
+    };
+
+    private string OwnTablePath(int lang, string name)
+    {
+        string file;
+        return UserTableFiles.TryGetValue(name, out file) ? Path.Combine(UserDir, Prefix(lang) + file + ".tbl") : null;
+    }
+
     internal Tbl Table(int lang, string name)
     {
         string key = Prefix(lang) + name;
@@ -311,9 +439,38 @@ internal sealed class Q9Data
         {
             byte[] raw;
             if (!res.TryGetValue(key, out raw)) throw new InvalidDataException("找不到資源 " + key);
-            tables[key] = t = new Tbl(raw);
+            byte[] data = (byte[])raw.Clone();
+            string own = OwnTablePath(lang, name);
+            if (own != null)
+            {
+                string original = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+                    @"q9\Q9W10\q9data\" + Path.GetFileName(own));
+                foreach (string path in new[] { own, original })
+                {
+                    if (!File.Exists(path)) continue;
+                    byte[] file = File.ReadAllBytes(path);
+                    // 只接受同資源一樣格式 (長度同表頭) 嘅副本
+                    if (file.Length == raw.Length && file[0] == raw[0] && file[1] == raw[1]) { data = file; break; }
+                }
+            }
+            tables[key] = t = new Tbl(data);
         }
         return t;
+    }
+
+    internal void SaveTable(int lang, string name)
+    {
+        Tbl t;
+        string path = OwnTablePath(lang, name);
+        if (path == null || !tables.TryGetValue(Prefix(lang) + name, out t)) return;
+        Directory.CreateDirectory(UserDir);
+        string temp = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
+        try
+        {
+            File.WriteAllBytes(temp, t.Bytes);
+            if (File.Exists(path)) File.Replace(temp, path, null); else File.Move(temp, path);
+        }
+        finally { if (File.Exists(temp)) File.Delete(temp); }
     }
 
     internal RelTable Rel(int lang)
@@ -354,8 +511,7 @@ internal sealed class Q9Data
         string mine = Path.Combine(UserDir, file);
         if (File.Exists(mine)) return mine;
         string original = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), @"q9\Q9W10\q9data\" + file);
-        string template = Path.Combine(Install, file);
-        string source = File.Exists(original) ? original : template;
+        string source = File.Exists(original) ? original : Files.Exists(file) ? Files.FilePath(file) : Path.Combine(Files.Install, file);
         if (!forEdit) return source;
         Directory.CreateDirectory(UserDir);
         if (File.Exists(source)) File.Copy(source, mine); else File.WriteAllText(mine, "", Encoding.Unicode);
@@ -580,13 +736,29 @@ internal sealed class Engine
         }
     }
 
+    // 最近用字或者學到嘅關聯字有改動，未寫入 state.txt
+    internal bool StateDirty;
+
+    // 先寫暫存檔再換入，中途斷電或者程式死咗都唔會留低寫咗一半嘅 state.txt
     internal void SaveState()
     {
         var lines = new List<string> { "mru0=" + mru[0], "mru1=" + mru[1] };
         foreach (var pair in learnedRel)
             lines.Add("rel2:" + pair.Key + "=" + string.Join(",", pair.Value.Select(p => p.Key + ":" + p.Value)));
         Directory.CreateDirectory(Data.UserDir);
-        File.WriteAllLines(statePath, lines, Encoding.UTF8);
+        foreach (var table in dirtyTables.ToList())
+        {
+            Data.SaveTable(table.Key, table.Value);
+            dirtyTables.Remove(table);
+        }
+        string temp = statePath + "." + Guid.NewGuid().ToString("N") + ".tmp";
+        try
+        {
+            File.WriteAllLines(temp, lines, Encoding.UTF8);
+            if (File.Exists(statePath)) File.Replace(temp, statePath, null); else File.Move(temp, statePath);
+            StateDirty = false;
+        }
+        finally { if (File.Exists(temp)) File.Delete(temp); }
     }
 
     internal static List<string> Elements(string s)
@@ -598,16 +770,35 @@ internal sealed class Engine
     }
 
     // ---------- 碼表 ----------
-    private Tbl Main
+    private Tbl Main { get { return Data.Table(MainLang, MainName); } }
+    private int MainLang { get { return Mode == Zhuyin || Mode == Canton ? 0 : Lang; } }
+    private string MainName
     {
         get
         {
-            if (Mode == Glyph) return Data.Table(Lang, "Q9DATA");
-            if (Mode == Pinyin) return Data.Table(Lang, "PYDATA");
-            if (Mode == Zhuyin) return Data.Table(0, "CYDATA");
-            if (Mode == Canton) return Data.Table(0, "CT_PYDATA");
-            return Data.Table(Lang, RadicalFirst ? "STIMDATA2" : "STIMDATA");
+            if (Mode == Glyph) return "Q9DATA";
+            if (Mode == Pinyin) return "PYDATA";
+            if (Mode == Zhuyin) return "CYDATA";
+            if (Mode == Canton) return "CT_PYDATA";
+            return RadicalFirst ? "STIMDATA2" : "STIMDATA";
         }
+    }
+
+    // 輸入過的字自動調前 (原版選單 Character position adjustment，登錄 q9UpdateOrder 預設 1)
+    internal bool UpdateOrder = true;
+    private readonly HashSet<KeyValuePair<int, string>> dirtyTables = new HashSet<KeyValuePair<int, string>>();
+
+    // FUN_1800add50 選字分支 → FUN_1800af290：數字碼揀字之後調前。字形「0」碼、
+    // 筆劃單一基本筆劃 (碼 < 6 或 10) 唔調；筆劃搬去第一頁第 9 格，其他碼表搬去第一頁尾後一格
+    private void PromoteChosen(string ch)
+    {
+        if (!UpdateOrder || Kind != "code" || Buf.Length == 0 || !Buf.All(char.IsDigit)) return;
+        if (Mode == Glyph && Buf[0] == '0') return;
+        int code = Code();
+        if (Mode == Stroke && (code < 6 || code == 10)) return;
+        if (!Main.Promote(code, ch, Mode == Stroke ? 8 : 9)) return;
+        dirtyTables.Add(new KeyValuePair<int, string>(MainLang, MainName));
+        StateDirty = true;
     }
 
     // 筆劃模式鍵位：7 8 9 → 橫 豎 撇 (1 2 3)，1 2 3 → 7 8 9 (FUN_1800af370)
@@ -713,14 +904,23 @@ internal sealed class Engine
             var predicted = Data.Rel(Lang).Get(Last)
                 .Where(rec => rec.Codes.Contains(code)).Take(9)
                 .Select(rec => rec.Ch).Where(ch => !leading.Contains(ch))
-                .Distinct().Take(3).ToList();
-            if (predicted.Count > 0)
-            {
-                foreach (string p in predicted) list.Remove(p);
-                list.InsertRange(Math.Min(list.Count, 9 - predicted.Count), predicted);
-            }
+                .Distinct().ToList();
+            if (predicted.Count > 0) list = WithPrediction(list, predicted);
         }
         return list;
+    }
+
+    // FUN_1800c0650：第一頁 = 頭 (9 - n) 個常規候選 + 最多 3 個預測字 (n = 預測字數，最多 3)；
+    // 預測字有 4 個或以上而常規候選仲有下一頁，第二頁最前面先放第 4 至第 9 個預測字，
+    // 之後先接返常規候選。常規候選入面同預測字重複嘅字唔會刪走 (原版照讀碼表)。
+    private static List<string> WithPrediction(List<string> list, List<string> predicted)
+    {
+        int first = Math.Min(3, predicted.Count), keep = 9 - first;
+        var result = list.Take(keep).ToList();
+        result.AddRange(predicted.Take(first));
+        if (predicted.Count > 3 && list.Count > keep) result.AddRange(predicted.Skip(3));
+        result.AddRange(list.Skip(keep));
+        return result;
     }
 
     // ---------- 關聯字 (FUN_1800be830 / FUN_1800be6c0) ----------
@@ -896,6 +1096,9 @@ internal sealed class Engine
 
     internal bool HasRelated { get { return Kind == "rel" && Cand.Any(c => c != null); } }
 
+    // 取碼時碼表有冇條目 (原版 param_7 候選數，部件都計)
+    internal bool HasPreview { get { return State == St.Compose && Kind == "code" && full.Count > 0; } }
+
     private void AfterEdit()
     {
         // 筆劃同粵拼每一步都喺左上角預覽候選字 (原版紫色細字)
@@ -999,6 +1202,43 @@ internal sealed class Engine
         return Finish(Buf + k + "5");
     }
 
+    // ---------- 滑鼠點格 (FUN_1800b4de0 → FUN_1800b7260 / FUN_1800ba6b0) ----------
+    // 拼音、注音取碼時，格仔四角係聲調區 (FUN_1800b7170 / FUN_1800ba5c0)：
+    // 左上 7 = 第一聲、右上 9 = 第二聲、左下 1 = 第四聲、右下 3 = 第三聲，中間 = 所有聲調 ('5')。
+    // corner 係 '7' '9' '1' '3' 或者 '\0' (中間)。滑鼠模式唔會停低問聲調，一下就完成取碼。
+    internal bool MouseKey(char k, char corner)
+    {
+        if (State != St.Compose || k < '0' || k > '9' || (Mode != Pinyin && Mode != Zhuyin)) return Key(k);
+        Note = ""; NoChar = false;
+        char tone = corner == '\0' ? '5' : ToneKey(corner);
+        if (Mode == Pinyin)
+        {
+            char d0 = Buf[0];
+            if (Buf.Length == 1)
+            {
+                // FUN_1800b74b0 (滑鼠)：單韻母 i o e u a 直接當完成韻母，再補聲調；中間照鍵盤
+                if (corner == '\0' || "24568".IndexOf(k) < 0) return Key(k);
+                return Finish(Buf + k + "0" + tone);
+            }
+            if (Buf.Length != 2 || Buf[1] == '0' && "689".IndexOf(d0) >= 0) return Key(k);
+            bool noInitial = Buf[1] == '0';
+            char vowel = noInitial ? NoInitialVowel(d0) : Buf[1];
+            if (noInitial && (k == '0' && (d0 == '2' || d0 == '6' || d0 == '8') || d0 == '8' && k == '3')) { Beep(); return true; }
+            char stored = Compound(vowel, k);
+            if (stored == '\0') { Beep(); return true; }
+            return Finish(Buf + stored + tone);
+        }
+        if (Buf.Length == 1)
+        {
+            if (Buf == "0" && k == '0') return Key(k);
+            // FUN_1800ba8d0 (滑鼠)：韻母唔即刻補「5」；介音 ㄧㄨㄩ 點角落 = 介音單獨成韻
+            if (k <= '6') return Finish(Buf + (k == '0' ? "00" : "0" + k) + tone);
+            if (corner == '\0') return Key(k);
+            return Finish(Buf + k + "0" + tone);
+        }
+        return Finish(Buf + k + tone);
+    }
+
     // 粵拼：逐個字母鍵，內部碼 = 按鍵 + 拼法序號；+／- 揀拼法，0 選字 (FUN_1800b9320)
     internal string CantonKeys { get { return Buf.Length > 0 ? Buf.Substring(0, Buf.Length - 1) : ""; } }
     internal int CantonChoice { get { return Buf.Length > 0 ? Buf[Buf.Length - 1] - '0' : 0; } }
@@ -1022,7 +1262,10 @@ internal sealed class Engine
             return true;
         }
         if (k == '0') { Finish(Buf); return true; }
-        if (k == '7' || k < '1' || k > '9' || Data.CantonSpellings(keys + k).Count == 0) { Beep(); Note = "沒有這個拼音"; return true; }
+        if (k == '7') { Beep(); Note = "沒有這個拼音"; return true; }
+        // FUN_1800b9320：碼表冇候選 (冇預覽字) 時，字母鍵先清碼，再由呢個字母重新開始
+        if (k >= '1' && k <= '9' && !HasPreview) { Buf = k + "1"; AfterEdit(); return true; }
+        if (k < '1' || k > '9' || Data.CantonSpellings(keys + k).Count == 0) { Beep(); Note = "沒有這個拼音"; return true; }
         Buf = keys + k + "1";
         if (Buf.Length == 7) Finish(Buf); else AfterEdit();
         return true;
@@ -1039,6 +1282,15 @@ internal sealed class Engine
         {
             Buf = Buf.Substring(0, Buf.Length - 1);
             if (Buf.Length == 0) Reset(); else AfterEdit();
+            return true;
+        }
+        // FUN_1800bf390：筆劃取碼時碼表冇條目，數字鍵先清碼；0 入標點頁，其他數字由呢一筆重新開始
+        if (Mode == Stroke && k >= '0' && k <= '9' && !HasPreview)
+        {
+            Buf = "";
+            if (k == '0') { OpenPunct(); return true; }
+            Buf = Swap(k).ToString();
+            AfterEdit();
             return true;
         }
         if (k >= '1' && k <= '9')
@@ -1088,7 +1340,10 @@ internal sealed class Engine
         if (k == '0' || k == '+')
         {
             if (HasMore) off += 9;
-            else if (Kind == "rel") { OpenPunct(); return true; }     // 關聯字揭完再按「0」入標點
+            // FUN_1800be2e0 / FUN_1800be830 (參數 3)：關聯字揭到尾，頁數設返 1，由第一頁再開始
+            else if (Kind == "rel") off = 0;
+            // FUN_1800ad6c0 (參數 3)：候選字揭到尾，返回值帶 2 (嗶一聲) 再由第一頁開始
+            else if (Kind == "code") { Beep(); off = 0; }
             else if (off == 0) { Beep(); return true; }
             else off = 0;
             ShowPage();
@@ -1096,7 +1351,15 @@ internal sealed class Engine
         }
         if (k == '-')
         {
-            if (off == 0) { Beep(); return true; }
+            if (off == 0)
+            {
+                // 關聯字第一頁：FUN_1800be2e0 參數 2 直接返回，冇聲冇反應
+                if (Kind == "rel") return true;
+                Beep();
+                // FUN_1800ad6c0 (參數 2)：非筆劃候選字第一頁再按上頁，揭去最後一頁；筆劃 (FUN_1800c0650) 停喺原位
+                if (Kind == "code" && Mode != Stroke && Pages > 1) { off = (Pages - 1) * 9; ShowPage(); }
+                return true;
+            }
             off -= 9; ShowPage();
             return true;
         }
@@ -1267,6 +1530,7 @@ internal sealed class Engine
         if (Output != null && text.Length > 0) Output(text);
         if (single)
         {
+            PromoteChosen(s);
             if (Mode == Stroke && Kind == "code" && Buf.Length >= 2 && Buf[0] >= '1' && Buf[0] <= '5')
             {
                 // 最近用字輪替 (q9sdyd)
@@ -1277,6 +1541,7 @@ internal sealed class Engine
                     recent.RemoveAt(b + 3);
                     recent.Insert(b, s);
                     mru[Lang] = string.Concat(recent);
+                    StateDirty = true;
                 }
             }
             if (RelMode == 2 && Last.Length > 0)
@@ -1287,6 +1552,7 @@ internal sealed class Engine
                 int n;
                 learned.TryGetValue(s, out n);
                 learned[s] = n + 1;
+                StateDirty = true;
             }
             Last = s;
         }
@@ -1328,8 +1594,11 @@ internal sealed class Engine
                 if (Buf.Length == 0) return HasRelated ? "CYREL.png" : "CYA0.png";
                 return Buf.Length == 1 || Buf[1] == '0' ? "CYB.png" : "CYC1.png";
             }
-            if (Mode == Canton) return Buf.Length > 0 || HasRelated ? "PYREL.png" : "PY0.png";
+            // FUN_1800b9790 / FUN_1800bf820：取碼時冇預覽字就用「未有字」圖 (索引 0x2e / 0x55)
+            bool preview = HasPreview;
+            if (Mode == Canton) return Buf.Length > 0 ? (preview ? "PYREL.png" : "PYNONE.png") : HasRelated ? "PYREL.png" : "PY0.png";
             if (Buf.Length == 0) return HasRelated ? "Q9STIM1.png" : "Q9STIM0.png";
+            if (!preview) return "q9stimNone.png";
             if (Buf.Length == 1 && Buf[0] >= '1' && Buf[0] <= '5')
                 return Buf[0] == '4' ? (Lang == 0 ? "Q9stim24b5.png" : "Q9stim24gb.png") : "Q9STIM2" + Buf + ".png";
             return "Q9STIM1.png";
