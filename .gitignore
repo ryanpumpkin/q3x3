@@ -1,0 +1,9 @@
+﻿# 編譯輸出
+*.exe
+*.pdb
+*.zip
+# 反編譯結果、原版素材同 REA 證據包含原版內容，唔放入 repo
+work/
+outputs/
+# 預覽截圖含原版皮膚美術，只留本機
+preview/
