@@ -120,6 +120,7 @@ internal sealed class Q9Panel : Form
         this.data = data; this.engine = engine; this.settings = settings;
         Text = "九方 W10 重建版";
         FormBorderStyle = FormBorderStyle.None;
+        TransparencyKey = ColorKey;
         AutoScaleMode = AutoScaleMode.None;
         DoubleBuffered = true;
         ShowInTaskbar = false;
@@ -254,8 +255,39 @@ internal sealed class Q9Panel : Form
 
     private int NextModeValue { get { var order = ModeCycle(); return order[(order.IndexOf(engine.Mode) + 1) % order.Count]; } }
 
-    // 同原版截圖對比，四捨五入比截斷吻合 (工具列差異 4.1% 對 5.0%)
-    private static int DrawRound(float v) { return (int)Math.Round(v); }
+
+    // AlphaBlend (預乘 alpha) 同樣嘅整數混色：dst = src×a/255 + dst×(255−a)/255，兩項都截斷
+    // (同原版截圖對比：截斷 0 個像素唔同，四捨五入有 3.7% 差 3-4 級)
+    private static bool BlendExact(Graphics g, Bitmap target, Bitmap src, int x, int y)
+    {
+        if (target.PixelFormat != System.Drawing.Imaging.PixelFormat.Format32bppArgb
+            && target.PixelFormat != System.Drawing.Imaging.PixelFormat.Format32bppRgb) return false;
+        var area = Rectangle.Intersect(new Rectangle(x, y, src.Width, src.Height), new Rectangle(Point.Empty, target.Size));
+        if (area.IsEmpty) return true;
+        g.Flush(System.Drawing.Drawing2D.FlushIntention.Sync);
+        var dl = target.LockBits(area, System.Drawing.Imaging.ImageLockMode.ReadWrite, target.PixelFormat);
+        var sl = src.LockBits(new Rectangle(area.X - x, area.Y - y, area.Width, area.Height),
+            System.Drawing.Imaging.ImageLockMode.ReadOnly, System.Drawing.Imaging.PixelFormat.Format32bppArgb);
+        try
+        {
+            var d = new byte[dl.Stride * area.Height];
+            var s = new byte[sl.Stride * area.Height];
+            System.Runtime.InteropServices.Marshal.Copy(dl.Scan0, d, 0, d.Length);
+            System.Runtime.InteropServices.Marshal.Copy(sl.Scan0, s, 0, s.Length);
+            const int r = 0;
+            for (int row = 0; row < area.Height; row++)
+                for (int col = 0; col < area.Width; col++)
+                {
+                    int si = row * sl.Stride + col * 4, di = row * dl.Stride + col * 4, a = s[si + 3];
+                    if (a == 0) continue;
+                    for (int c = 0; c < 3; c++)
+                        d[di + c] = (byte)((s[si + c] * a + r) / 255 + (d[di + c] * (255 - a) + r) / 255);
+                }
+            System.Runtime.InteropServices.Marshal.Copy(d, 0, dl.Scan0, d.Length);
+        }
+        finally { target.UnlockBits(dl); src.UnlockBits(sl); }
+        return true;
+    }
 
     private void Draw(Graphics g, string image, RectangleF area)
     {
@@ -264,7 +296,11 @@ internal sealed class Q9Panel : Form
         // 原版 (FUN_18010d2e0) 用 BitBlt 將皮膚圖原大畫喺整數位置；圖嘅大細同範圍差唔多就唔好縮放
         if (Math.Abs(img.Width - area.Width) <= 1.5f && Math.Abs(img.Height - area.Height) <= 1.5f)
         {
-            int x = DrawRound(area.X), y = DrawRound(area.Y);
+            // 位置 = floor(設計座標 × (闊度 + 3) / SkinWidth)：同原版截圖逐個掣對過
+            // (九方掣、↵、简、−、+ 嘅 x / y 全部吻合；用 S 四捨五入會差 1-2 像素)
+            float s = S, s2 = (ClientSize.Width + 3) / skin.Width;
+            int x = (int)(area.X / s * s2), y = (int)(area.Y / s * s2);
+            if (frame != null && BlendExact(g, frame.Bitmap, (Bitmap)img, x, y)) return;
             g.DrawImage(img, new Rectangle(x, y, img.Width, img.Height), 0, 0, img.Width, img.Height, GraphicsUnit.Pixel);
             return;
         }
@@ -291,6 +327,7 @@ internal sealed class Q9Panel : Form
         }
     }
 
+    private static readonly Color ColorKey = Color.FromArgb(192, 192, 192);  // 原版 SetLayeredWindowAttributes 0xC0C0C0
     private static readonly Color Fill = Color.FromArgb(222, 205, 206);      // kFillBlankColor
     private static readonly Color RelatedFill = Color.FromArgb(203, 255, 255, 255);
     private static readonly Color Empty = Color.FromArgb(193, 192, 192);     // 0xC0C0C1
@@ -501,7 +538,13 @@ internal sealed class Q9Panel : Form
         g.InterpolationMode = InterpolationMode.HighQualityBicubic;
         g.PixelOffsetMode = PixelOffsetMode.HighQuality;
         float s = S;
-        g.DrawImage(skin.Get("q9.png"), 0, 0, ClientSize.Width, ClientSize.Height);
+        // 原版視窗用 color key 0xC0C0C0 (SetLayeredWindowAttributes …, 3)：先填 key 色，
+        // 皮膚圖半透明嘅邊會混灰色，完全透明嘅位就變透明
+        g.Clear(ColorKey);
+        var skinImage = (Bitmap)skin.Get("q9.png");
+        if (!(skinImage.Width == ClientSize.Width && skinImage.Height == ClientSize.Height && frame != null
+              && BlendExact(g, frame.Bitmap, skinImage, 0, 0)))
+            g.DrawImage(skinImage, 0, 0, ClientSize.Width, ClientSize.Height);
 
         bool numberLike = engine.Mode == Engine.Number || engine.Mode == Engine.Emoji;
         Draw(g, ModeImage(NextModeValue), Px(skin.Area("CUR_IM_BUT")));
@@ -528,7 +571,9 @@ internal sealed class Q9Panel : Form
         using (var fill = new SolidBrush(idleGrid ? RelatedFill : Fill))
         using (var empty = new SolidBrush(Empty))
         {
-            g.FillRectangle(fill, input);
+            // 靜止冇關聯字：原版直接畫 Button09.png (白色 alpha 204 連「取消」)
+            if (idleGrid && !related) Draw(g, "Button09.png", input);
+            else g.FillRectangle(fill, input);
             for (int key = 1; key <= 9; key++)
             {
                 bool blank = select && engine.Cand[key - 1] == null
@@ -556,7 +601,7 @@ internal sealed class Q9Panel : Form
             }
         }
         Draw(g, "Button09Transparent.png", input);
-        if (dot == "取消") g.DrawImage(CancelText, input);
+        if (dot == "取消" && !(idleGrid && !related)) g.DrawImage(CancelText, input);
 
         // 資料視窗下面嘅收起掣
         Draw(g, "Button17.png", Px(skin.Area("MESSAGE_AREA_HIDE")));
