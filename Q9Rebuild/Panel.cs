@@ -121,7 +121,8 @@ internal sealed class Q9Panel : Form
         ShowInTaskbar = false;
         StartPosition = FormStartPosition.Manual;
         if (settings["Ver"] < 2) { settings["RelMode"] = 2; settings["Ver"] = 2; }   // 舊設定改用原版預設嘅動態關聯字
-        engine.Mode = settings["Mode"]; engine.Lang = settings["Lang"];
+        engine.SetLang(settings["Lang"]);
+        engine.SetMode(engine.SupportsMode(settings["Mode"]) ? settings["Mode"] : EnabledChineseModes().First());
         engine.OutputConvert = settings["Convert"] != 0; engine.RelMode = settings["RelMode"];
         engine.HalfPunct = settings["HalfPunct"] != 0; engine.RadicalFirst = settings["Radical"] != 0;
         engine.Output = Deliver;
@@ -226,8 +227,7 @@ internal sealed class Q9Panel : Form
     // 原版輸入法掣顯示「下一個」輸入法：筆劃 → 字形 → 拼音 → 注音 → 粵拼 → 數字 → 表情符號
     private List<int> ModeCycle()
     {
-        var order = new[] { Engine.Stroke, Engine.Glyph, Engine.Pinyin, Engine.Zhuyin, Engine.Canton }.Where(m => settings["On" + m] != 0).ToList();
-        if (order.Count == 0) order.Add(settings["Mode"]);
+        var order = EnabledChineseModes();
         if (settings["ModeNumber"] != 0) order.Add(Engine.Number);
         if (settings["ModeEmoji"] != 0) order.Add(Engine.Emoji);
         return order;
@@ -297,8 +297,25 @@ internal sealed class Q9Panel : Form
         if (engine.Kind == "emojicat") { key0 = "標點"; return; }
         if (select)
         {
+            if (engine.Kind == "lookup-menu") { lines = new[] { "選檢字方法" }; return; }
+            if (engine.Kind == "shape-extra") { lines = new[] { "選字形結構" }; return; }
+            if (engine.Kind == "sound-extra") { key0 = "姓氏"; lines = new[] { "請選字的聲母作補音", "或按０選姓氏／外字" }; return; }
             key0 = "下頁";
-            if (engine.Kind == "punct" || engine.Kind == "sym") { lines = engine.Kind == "sym" ? new[] { "選常用標點符號" } : null; return; }
+            if (engine.Kind == "punct") { key0 = "符號"; return; }
+            if (engine.Kind == "sym") { lines = new[] { "選常用標點符號" }; return; }
+            if (engine.Kind == "stroke-count" || engine.Kind == "radical-count" || engine.Kind == "lookup-result")
+            {
+                minus = "button10_pgup.png"; plus = "button11_nextpage.png";
+                lines = engine.Kind == "stroke-count" ? new[] { "選筆劃數目" }
+                    : engine.Kind == "radical-count" ? new[] { "選部首" } : browse;
+                return;
+            }
+            if (engine.Kind == "phrase")
+            {
+                minus = "button10_pgup.png";
+                lines = engine.Last.Length == 0 ? browse : new[] { "按０下頁", "按右邊＋改詞長" };
+                return;
+            }
             lines = browse;
             if (engine.Kind == "emoji" || mode == Engine.Pinyin || mode == Engine.Zhuyin || mode == Engine.Canton)
             { minus = "button10_pgup.png"; plus = "button11_nextpage.png"; }
@@ -389,7 +406,9 @@ internal sealed class Q9Panel : Form
 
         // 九宮格：格仔底色 → 底圖 → 四角三角 → 格線
         RectangleF input = Input;
-        bool select = engine.State == St.Select && engine.Kind != "emojicat" && engine.Kind != "punct";
+        bool select = engine.State == St.Select && engine.Kind != "emojicat" && engine.Kind != "punct" && engine.Kind != "shape-extra";
+        bool choosingMethod = engine.Kind == "lookup-menu" || engine.Kind == "stroke-count"
+            || engine.Kind == "radical-count" || engine.Kind == "sound-extra";
         // 上字後嘅關聯字頁用半透明白底，保留皮膚圖案；取碼同選字頁仍用實色。
         bool related = ShowingRelated;
         string image = engine.Image;
@@ -408,7 +427,7 @@ internal sealed class Q9Panel : Form
                 RectangleF grid = new RectangleF(input.X, input.Y, input.Width, input.Width * 688f / 682f);
                 Draw(g, image, grid);
             }
-            if (select)
+            if (select && !choosingMethod)
             {
                 float c = skin.Value("UI.CornerSize", 40) * s;
                 for (int key = 1; key <= 9; key++)
@@ -547,15 +566,31 @@ internal sealed class Q9Panel : Form
     private static readonly int[] ChineseModes = { Engine.Stroke, Engine.Glyph, Engine.Pinyin, Engine.Canton, Engine.Zhuyin };
     private static readonly string[] ChineseNames = { "九方筆劃輸入", "九方字形輸入", "九方拼音輸入", "九方粵語拼音輸入", "九方注音輸入" };
 
+    private List<int> EnabledChineseModes()
+    {
+        var order = new[] { Engine.Stroke, Engine.Glyph, Engine.Pinyin, Engine.Zhuyin, Engine.Canton }
+            .Where(mode => engine.SupportsMode(mode) && settings["On" + mode] != 0).ToList();
+        if (order.Count == 0) order.Add(Engine.Stroke);
+        return order;
+    }
+
+    private void SetLanguage(int lang)
+    {
+        int previousMode = engine.Mode;
+        settings["Lang"] = lang;
+        engine.SetLang(lang);
+        if (!engine.SupportsMode(previousMode)) engine.SetMode(EnabledChineseModes().First());
+    }
+
     private void SetChinese(int mode) { settings["Mode"] = mode; settings["On" + mode] = 1; engine.SetMode(mode); Invalidate(); }
 
     private void ToggleChinese(int mode)
     {
         bool on = settings["On" + mode] == 0;
-        if (!on && ChineseModes.Count(m => settings["On" + m] != 0) == 1) { Native.MessageBeep(0); return; }  // 最少留一個
+        if (!on && EnabledChineseModes().Count == 1) { Native.MessageBeep(0); return; }  // 最少留一個
         settings["On" + mode] = on ? 1 : 0;
         if (on) SetChinese(mode);
-        else if (engine.Mode == mode) SetChinese(ChineseModes.First(m => settings["On" + m] != 0));
+        else if (engine.Mode == mode) SetChinese(EnabledChineseModes().First());
     }
     internal void SetModeForPreview(int mode) { engine.SetMode(mode); }
 
@@ -720,12 +755,17 @@ internal sealed class Q9Panel : Form
         else if (hit("BACKSPACE_BUT")) { if (!engine.Key('\b')) Native.Tap(0x08); }
         else if (hit("ENTER_BUT"))
         {
-            if (engine.Mode == Engine.Number || engine.Mode == Engine.Emoji) engine.SetMode(settings["Mode"]);
+            if (engine.Mode == Engine.Number || engine.Mode == Engine.Emoji)
+                engine.SetMode(engine.SupportsMode(settings["Mode"]) ? settings["Mode"] : EnabledChineseModes().First());
             else Native.Tap(0x0D);
         }
         else if (hit("SPACE_BUT")) Native.Tap(0x20);
         else if (hit("MINUS_BUT")) engine.Key('-');
-        else if (hit("PLUS_BUT")) engine.Key('+');
+        else if (hit("PLUS_BUT"))
+        {
+            if (engine.Kind == "phrase" && engine.Last.Length != 0) engine.CyclePhraseLength();
+            else engine.Key('+');
+        }
         else if (hit("PRE_PAGE_BUT")) { settings["Top"] = 1; Dock_(true); }
         else if (hit("NEXT_PAGE_BUT")) { settings["Top"] = 0; Dock_(false); }
         else if (ZeroKey.Contains(p)) engine.Key('0');
@@ -764,8 +804,8 @@ internal sealed class Q9Panel : Form
         menu.Items.Clear();
         var root = menu.Items;
         var language = Item(root, "設定輸入文字", false, null).DropDownItems;
-        Item(language, "繁體中文", engine.Lang == 0, delegate { settings["Lang"] = 0; engine.SetLang(0); });
-        Item(language, "簡體中文", engine.Lang == 1, delegate { settings["Lang"] = 1; engine.SetLang(1); });
+        Item(language, "繁體中文", engine.Lang == 0, delegate { SetLanguage(0); });
+        Item(language, "簡體中文", engine.Lang == 1, delegate { SetLanguage(1); });
         Item(root, engine.Lang == 0 ? "輸出簡體字" : "輸出繁體字", engine.OutputConvert,
             delegate { engine.OutputConvert = !engine.OutputConvert; settings["Convert"] = engine.OutputConvert ? 1 : 0; });
         var current = Item(root, "目前輸入法", false, null).DropDownItems;
@@ -774,8 +814,8 @@ internal sealed class Q9Panel : Form
         for (int i = 0; i < ChineseModes.Length; i++)
         {
             int mode = ChineseModes[i];
-            Item(current, ChineseNames[i], engine.Mode == mode, delegate { SetChinese(mode); });
-            Item(modes, ChineseNames[i], settings["On" + mode] != 0, delegate { ToggleChinese(mode); });
+            Item(current, ChineseNames[i], engine.Mode == mode, delegate { SetChinese(mode); }).Enabled = engine.SupportsMode(mode);
+            Item(modes, ChineseNames[i], settings["On" + mode] != 0, delegate { ToggleChinese(mode); }).Enabled = engine.SupportsMode(mode);
         }
         modes.Add(new ToolStripSeparator());
         Toggle(modes, "數字輸入（用「/」切換）", "ModeNumber", null);
@@ -1075,6 +1115,13 @@ internal static class Program
         var sent = new List<string>();
         engine.Output = sent.Add;
         engine.RelMode = 0;
+        // 原版筆劃上文預測唔會將頭六個常規候選移到預測字區。
+        engine.Last = "十";
+        Keys(engine, "940");
+        Check(engine.Cand.Take(6).SequenceEqual(new[] { "人", "會", "為", "愛", "分", "全" }),
+            "筆劃 十接94：分留喺第5格");
+        engine.Last = "";
+        engine.ResetQuiet();
         // 筆劃：志 = 橫(7) 土(1)；碼 = 橫(7) 撇(9) 橫(7)；入 = 撇(9) 點(4)
         Keys(engine, "710"); Check(engine.State == St.Select && engine.Cand.Contains("志"), "筆劃 志");
         Keys(engine, ".797"); Check(engine.Cand.Contains("碼"), "筆劃 碼");
@@ -1090,10 +1137,20 @@ internal static class Program
         engine.RelMode = 3; engine.Reset();
         Keys(engine, "0"); Check(engine.Kind == "punct" && engine.Image == "Q9_P.png", "標點頁");
         Keys(engine, "5"); Check(sent.Last() == "，", "逗號");
-        Keys(engine, "09"); Check(engine.Kind == "sym" && engine.Pages > 10, "其他符號");
+        Keys(engine, "09"); Check(engine.Kind == "lookup-menu", "其他開啟選檢字方法");
+        Keys(engine, "4"); Check(engine.Kind == "sym" && engine.Cand[0] == "ㄅ", "原版注音符號分類");
+        Keys(engine, ".00"); Check(engine.Kind == "sym" && engine.Pages > 10, "完整標點符號表");
+        Keys(engine, ".0912"); Check(engine.Kind == "lookup-result" && engine.Cand.Contains("人"), "按總筆劃檢字");
         Keys(engine, ".");
         // 字形：九 270、快 892、中 810
         engine.SetMode(Engine.Glyph);
+        Keys(engine, "10"); Check(engine.Cand.Take(6).SequenceEqual(new[] { "都", "華", "車", "相", "東", "林" }), "字形姓氏");
+        Keys(engine, "-"); Check(engine.Image == "ShapeExtra.png", "字形檢字入口");
+        Keys(engine, "4"); Check(engine.State == St.Select && engine.Kind == "code" && engine.Cand[0] == "都", "原版字形檢字分組");
+        Keys(engine, ".");
+        Keys(engine, "10+"); Check(engine.Kind == "sound-extra", "補音／姓氏入口");
+        Keys(engine, "0"); Check(engine.Kind == "code" && engine.Cand.Contains("林"), "原版補音／姓氏分組");
+        Keys(engine, ".");
         Keys(engine, "270"); Check(engine.Cand.Contains("九"), "字形 九");
         Keys(engine, ".892"); Check(engine.Cand[0] == "快", "字形 快");
         Keys(engine, ".810"); Check(engine.Cand.Contains("中"), "字形 中");
@@ -1104,6 +1161,8 @@ internal static class Program
         Keys(engine, ".12"); Check(engine.Image == "PY3I.png", "拼音 i 複韻母圖");
         Keys(engine, "0"); Check(engine.Image == "PY40.png" && engine.State == St.Compose, "拼音聲調");
         Keys(engine, "9"); Check(engine.Cand.Contains("時") && !engine.Cand.Contains("是"), "拼音 時");
+        Keys(engine, ".362"); Check(engine.State == St.Compose && engine.Image == "PY40.png", "拼音 362 等候聲調");
+        Keys(engine, "7"); Check(engine.State == St.Select && engine.Buf == "3624", "拼音 362 第一聲");
         Keys(engine, ".808"); Check(engine.Cand.Contains("安"), "拼音 安");
         Keys(engine, ".80"); Check(engine.Kind == "pyhint" && engine.Cand[4] == "啊", "拼音 a 單字");
         Keys(engine, "5"); Check(sent.Last() == "啊", "拼音 上 啊");
@@ -1114,6 +1173,12 @@ internal static class Program
         engine.SetMode(Engine.Zhuyin);
         Keys(engine, "370"); Check(engine.Cand.Contains("西"), "注音 西");
         Keys(engine, ".11"); Check(engine.Cand.Contains("找"), "注音 找");
+        engine.SetMode(Engine.Zhuyin);
+        Keys(engine, "00"); Check(engine.Kind == "lookup-menu", "注音 00 開啟檢字方法");
+        Keys(engine, ".");
+        Keys(engine, "01"); Check(engine.State == St.Select, "注音無聲母直接揀韻母");
+        Keys(engine, "b"); Check(engine.State == St.Compose && engine.Buf == "0", "注音無聲母退回韻母鍵盤");
+        Keys(engine, "7"); Check(engine.State == St.Compose && engine.Buf == "07", "注音退格後可以揀介音");
         Keys(engine, ".");
         // 粵拼：陳 = c h a n，揀第 3 個拼法 chan
         engine.SetMode(Engine.Canton);
@@ -1125,10 +1190,18 @@ internal static class Program
         Keys(engine, "33"); Check(engine.CodeText == "[zy]", "粵拼單一拼法 zy");
         Keys(engine, "0"); Check(engine.Cand.SequenceEqual(new[] { "渚", "拄", "箸", null, null, null, null, null, null }), "粵拼 zy 候選次序");
         Keys(engine, "."); engine.SetLang(1);
-        Keys(engine, "84860"); Check(engine.Cand.Contains("陈"), "簡體粵拼");
-        Keys(engine, "."); engine.SetMode(Engine.Zhuyin);
-        Keys(engine, "370"); Check(engine.Cand.Contains("西") && engine.Cand.Contains("习"), "簡體注音");
-        Keys(engine, "."); engine.SetMode(Engine.Pinyin);
+        Check(!engine.SupportsMode(Engine.Canton) && !engine.SupportsMode(Engine.Zhuyin) && engine.Mode == Engine.Stroke, "原版簡體停用粵拼同注音");
+        engine.SetMode(Engine.Zhuyin); Check(engine.Mode == Engine.Stroke, "簡體唔接受注音模式切換");
+        Check(data.Phrases(0).Take(3).SequenceEqual(new[] { "一直", "一定", "一起" })
+            && data.Phrases(1).Contains("人体"), "原版繁簡內置詞庫");
+        engine.SetLang(0);
+        engine.Last = "人";
+        Keys(engine, "+"); Check(engine.Kind == "phrase" && engine.Cand.Contains("人體"), "詞輸入讀取原版內置詞庫");
+        engine.CyclePhraseLength();
+        Check(engine.Cand.Any(s => s != null) && engine.Cand.Where(s => s != null).All(s => Engine.Elements(s).Count == 3),
+            "詞輸入切換三字詞");
+        Keys(engine, ".");
+        engine.SetLang(1); engine.SetMode(Engine.Pinyin);
         Keys(engine, "165"); Check(engine.Cand.Contains("双"), "簡體拼音");
         Keys(engine, "."); engine.SetMode(Engine.Glyph);
         Keys(engine, "892"); Check(engine.Cand.Contains("快"), "簡體字形");

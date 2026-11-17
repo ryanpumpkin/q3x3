@@ -211,6 +211,7 @@ internal sealed class Q9Data
                 throw new InvalidDataException("原裝 DLL 版本與已分析版本不符。");
         res = Pe.NamedResources(image);
         LoadCanton(image);
+        LoadExtraGroups(image);
     }
 
     // ---------- 粵拼音節表 (.rdata，FUN_1800b9f00 / FUN_1800ba1e0) ----------
@@ -255,6 +256,49 @@ internal sealed class Q9Data
     {
         int i = Array.BinarySearch(ctNums, 1, ctNums.Length - 1, value);
         return i > 0 ? i + 1 : 0;
+    }
+
+    private HashSet<int>[][] shapeGroups;
+    private HashSet<int>[][] soundGroups;
+
+    private static HashSet<int>[] ReadGroups(byte[] image, params long[] addresses)
+    {
+        return addresses.Select(address =>
+        {
+            var keys = new HashSet<int>();
+            if (address != 0)
+                for (int p = Rdata(address); p + 1 < image.Length; p += 2)
+                {
+                    int key = image[p] << 8 | image[p + 1];
+                    if (key == 0) break;
+                    keys.Add(key);
+                }
+            return keys;
+        }).ToArray();
+    }
+
+    private void LoadExtraGroups(byte[] image)
+    {
+        // FUN_1800ae730: shape classes E and the default phonetic classes e (q9ExtKEY = 2).
+        shapeGroups = new[]
+        {
+            ReadGroups(image, 0, 0x180135d10, 0x180135d70, 0x180135eb0, 0x18012ed80,
+                0x1801345a0, 0x180135110, 0x18012d410, 0x18012d830, 0x18012ed10),
+            ReadGroups(image, 0, 0x1801232f8, 0x1801396c0, 0x180139770, 0x180137020,
+                0x180139010, 0x180139310, 0x1801362f0, 0x180136530, 0x180136fa0)
+        };
+        long[] initials = { 0, 0x180121980, 0x180122360, 0x180122740, 0x180123350,
+            0x180123f60, 0x1801250f0, 0x180126340, 0x180125880, 0x180126340 };
+        var groups = ReadGroups(image, initials);
+        soundGroups = new[] { groups, (HashSet<int>[])groups.Clone() };
+        soundGroups[0][0] = ReadGroups(image, 0x18013d370)[0];
+        soundGroups[1][0] = ReadGroups(image, 0x18013fde0)[0];
+    }
+
+    internal bool InExtraGroup(int lang, bool shape, int group, string character)
+    {
+        byte[] code = Dbcs.Encode(lang, character);
+        return code != null && (shape ? shapeGroups : soundGroups)[lang][group].Contains(code[0] << 8 | code[1]);
     }
 
     internal static string Prefix(int lang) { return lang == 0 ? "B5_" : "GB_"; }
@@ -393,13 +437,52 @@ internal sealed class Q9Data
         var list = new List<string>();
         string path = UserFile(lang, name, false);
         if (!File.Exists(path)) return list;
-        foreach (string raw in File.ReadAllLines(path))   // 有 BOM 嘅 UTF-16，冇就當系統 ANSI
+        string[] lines;
+        try { lines = File.ReadAllLines(path, new UTF8Encoding(false, true)); }   // File.ReadAllLines 會識別 UTF-16 BOM
+        catch (DecoderFallbackException) { lines = File.ReadAllLines(path, Encoding.GetEncoding(lang == 0 ? 950 : 936)); }
+        foreach (string raw in lines)
         {
             string line = raw.TrimEnd();
             if (line.Length == 0 || line[0] == '\t' || line[0] == '﻿' && line.Length > 1 && line[1] == '\t') continue;
             list.Add(line.TrimStart('﻿'));
         }
         return list;
+    }
+
+    private readonly List<string>[] builtInPhrases = new List<string>[2];
+
+    internal IEnumerable<string> Phrases(int lang)
+    {
+        if (builtInPhrases[lang] == null)
+        {
+            var phrases = new List<string>();
+            byte[] encoded;
+            if (res.TryGetValue(Prefix(lang) + "Q9INPHRASEDATA", out encoded))
+            {
+                // FUN_18000da40: decrypt the resource, then read DBCS lines in their stored order.
+                byte[] text = encoded.Select(b => (byte)(b ^ 0xe8)).ToArray();
+                int length = Array.IndexOf(text, (byte)0);
+                if (length < 0) length = text.Length;
+                var line = new StringBuilder();
+                for (int i = 0; i < length; i++)
+                {
+                    byte b = text[i];
+                    if (b == '\r') continue;
+                    if (b == '\n') { AddPhrase(phrases, line); continue; }
+                    if (b < 0x80) line.Append((char)b);
+                    else if (i + 1 < length) { line.Append(Dbcs.Decode(lang, b, text[i + 1])); i++; }
+                }
+                AddPhrase(phrases, line);
+            }
+            builtInPhrases[lang] = phrases;
+        }
+        return builtInPhrases[lang];
+    }
+
+    private static void AddPhrase(List<string> phrases, StringBuilder line)
+    {
+        if (line.Length > 0 && !char.IsWhiteSpace(line[0])) phrases.Add(line.ToString());
+        line.Clear();
     }
 }
 
@@ -442,6 +525,8 @@ internal sealed class Engine
     internal Action Beep = delegate { };
 
     private List<string> full = new List<string>();
+    private int previousLookupMode;
+    private int phraseSuffixLength = 1;
     private int off;
     private bool visual;                      // 清單以畫面次序 (上排先) 儲存
     // 重建版自己學返嘅關聯字次數 (唔寫入原版檔案)："語言:前字" → 後字 → 加咗幾多次
@@ -519,8 +604,8 @@ internal sealed class Engine
         {
             if (Mode == Glyph) return Data.Table(Lang, "Q9DATA");
             if (Mode == Pinyin) return Data.Table(Lang, "PYDATA");
-            if (Mode == Zhuyin) return Data.Table(0, "CYDATA");      // 原版冇簡體注音表，用繁體表再轉換
-            if (Mode == Canton) return Data.Table(0, "CT_PYDATA");   // 簡體粵拼表原版未有內容，用繁體表再轉換
+            if (Mode == Zhuyin) return Data.Table(0, "CYDATA");
+            if (Mode == Canton) return Data.Table(0, "CT_PYDATA");
             return Data.Table(Lang, RadicalFirst ? "STIMDATA2" : "STIMDATA");
         }
     }
@@ -567,7 +652,7 @@ internal sealed class Engine
     }
 
     // 普通話拼音：聲母 → 單韻母 → 複韻母 →（常用音節先揀聲調）(FUN_1800b74b0)
-    private static readonly HashSet<int> NeedTone = new HashSet<int> { 120, 160, 320, 321, 328, 346, 358, 360, 364, 385, 389,
+    private static readonly HashSet<int> NeedTone = new HashSet<int> { 120, 160, 320, 321, 328, 346, 358, 360, 362, 364, 385, 389,
         460, 461, 520, 521, 524, 528, 560, 820, 960 };
 
     private static char NoInitialVowel(char key)
@@ -606,13 +691,11 @@ internal sealed class Engine
     }
 
     // 筆劃查表 (FUN_1800c0650 + FUN_1800c03e0)：單一基本筆劃時「1 2 3 6」鍵換成最近用字；
-    // 兩碼或以上時，將上文預測 (同一筆劃碼嘅關聯字，最多 3 個) 接喺第一頁尾。
+    // 兩碼或以上時，上文預測略過頭 6 個常規候選，再將最多 3 個關聯字接喺第一頁尾。
     private List<string> Lookup()
     {
         Tbl t = Main;
         var list = t.Get(Code());
-        if ((Mode == Canton || Mode == Zhuyin) && Lang == 1)
-            list = list.Select(s => s == Tbl.Blank ? s : Data.Convert(0, s)).Distinct().ToList();
         if (Mode != Stroke) return list;
         if (Buf.Length == 1 && Buf[0] >= '1' && Buf[0] <= '5')
         {
@@ -625,9 +708,12 @@ internal sealed class Engine
         if (Buf.Length >= 2 && Last.Length > 0 && RelMode != 3)
         {
             int code = Code();
-            var predicted = new List<string>();
-            foreach (var rec in Data.Rel(Lang).Get(Last))
-                if (rec.Codes.Contains(code) && !predicted.Contains(rec.Ch) && predicted.Count < 3) predicted.Add(rec.Ch);
+            // FUN_1800beb80 讀最多九個同碼關聯字，FUN_1800c02d0 排除頭六個常規候選。
+            var leading = new HashSet<string>(list.Take(6));
+            var predicted = Data.Rel(Lang).Get(Last)
+                .Where(rec => rec.Codes.Contains(code)).Take(9)
+                .Select(rec => rec.Ch).Where(ch => !leading.Contains(ch))
+                .Distinct().Take(3).ToList();
             if (predicted.Count > 0)
             {
                 foreach (string p in predicted) list.Remove(p);
@@ -723,6 +809,7 @@ internal sealed class Engine
 
     internal void Reset()
     {
+        if (previousLookupMode != 0) { Mode = previousLookupMode; previousLookupMode = 0; }
         Buf = ""; State = St.Idle; Note = ""; NoChar = false;
         if (Chinese)
         {
@@ -751,8 +838,23 @@ internal sealed class Engine
 
     private bool relActive;                   // 啟動／轉輸入法之後出過關聯字未
 
-    internal void SetMode(int mode) { Mode = mode; ResetQuiet(); }
-    internal void SetLang(int lang) { Lang = lang; Last = ""; ResetQuiet(); }
+    // 原版簡體設定停用注音同粵拼 (FUN_1800d2590)。
+    internal bool SupportsMode(int mode) { return Lang == 0 || (mode != Zhuyin && mode != Canton); }
+    internal void SetMode(int mode)
+    {
+        if (!SupportsMode(mode)) return;
+        previousLookupMode = 0;
+        Mode = mode;
+        ResetQuiet();
+    }
+    internal void SetLang(int lang)
+    {
+        Lang = lang;
+        Last = "";
+        previousLookupMode = 0;
+        if (!SupportsMode(Mode)) Mode = Stroke;
+        ResetQuiet();
+    }
 
     // ---------- 按鍵 ----------
     // 鍵值：'0'-'9' '.' '+' '-' '\b'。回傳 false 表示引擎冇處理 (交返俾應用程式)。
@@ -787,7 +889,7 @@ internal sealed class Engine
         // 有關聯字時「0」係選字、「.」係標點；冇關聯字時「0」直接入標點 (FUN_1800af370 0x2e/0x30 互換)
         if (k == '0' && hasRel) { State = St.Select; return true; }
         if (k == '0' || k == '.' && hasRel) { OpenPunct(); return true; }
-        if (k == '+') { OpenPhrases(); return true; }
+        if (k == '+') { phraseSuffixLength = 1; OpenPhrases(); return true; }
         if (k == '-') { OpenTexts("fav", Data.UserLines(Lang, "yourAlwaysUse.txt"), "未有自定常用字句"); return true; }
         return false;
     }
@@ -888,7 +990,7 @@ internal sealed class Engine
         if (k < '0' || k > '9') return true;
         if (Buf.Length == 1)
         {
-            if (k == '0' && Buf == "0") { Buf = "00"; AfterEdit(); return true; }
+            if (k == '0' && Buf == "0") { OpenLookupMenu(); return true; }
             if (k == '0') return Finish(Buf + "005");
             if (k <= '6') return Finish(Buf + "0" + k + "5");
             Buf += k; AfterEdit();
@@ -932,6 +1034,7 @@ internal sealed class Engine
         if (Mode == Pinyin) return PinyinKey(k);
         if (Mode == Zhuyin) return ZhuyinKey(k);
         if (Mode == Canton) return CantonKey(k);
+        if (k == '-' || k == '+') return OpenExtra(k == '-');
         if (k == '\b')
         {
             Buf = Buf.Substring(0, Buf.Length - 1);
@@ -949,7 +1052,7 @@ internal sealed class Engine
             State = St.Select;
             return true;
         }
-        if (k == '0' || k == '+')
+        if (k == '0')
         {
             var list = Lookup();
             if (list.All(c => c == Tbl.Blank)) { Beep(); Note = "沒有候選字"; return true; }
@@ -962,11 +1065,22 @@ internal sealed class Engine
 
     private bool SelectKey(char k)
     {
+        if (Kind == "lookup-menu" && k >= '1' && k <= '9') return ChooseLookup(k - '0');
+        if ((Kind == "stroke-count" || Kind == "radical-count") && k >= '1' && k <= '9')
+        {
+            int row = off + k - '0';
+            return OpenLookupRow(Kind == "stroke-count" ? "STDATA" : "RADDATA", row);
+        }
+        if ((Kind == "shape-extra" || Kind == "sound-extra") && k >= '0' && k <= '9')
+            return FilterExtra(Kind == "shape-extra", k - '0');
+        if (Kind == "punct" && k == '0') { OpenSymbols(); return true; }
+        if (Kind == "code" && (Mode == Glyph || Mode == Stroke) && (k == '+' || (k == '-' && off == 0)))
+            return OpenExtra(k == '-');
         if (k >= '1' && k <= '9')
         {
             string s = Cand[k - '1'];
             if (s == null) { Beep(); return true; }
-            if (Kind == "punct" && k == '9') { OpenSymbols(); return true; }
+            if (Kind == "punct" && k == '9') { OpenLookupMenu(); return true; }
             if (Kind == "emojicat") { SetList("emoji", Data.Table(Lang, "EMOJIDATA").Get(k - '0'), false); return true; }
             Commit(s);
             return true;
@@ -994,7 +1108,8 @@ internal sealed class Engine
                 if (Buf[0] == '0' && Buf[1] != '0') { Reset(); return true; }       // 四角符號
                 Buf = Buf.Substring(0, 2);
             }
-            else if (Mode == Zhuyin) Buf = Buf.Substring(0, Buf[1] == '0' && Buf[0] != '0' ? 1 : 2);
+            // FUN_1800ba8d0：有介音保留兩碼，直接揀韻母就只保留聲母鍵（包括 0）。
+            else if (Mode == Zhuyin) Buf = Buf.Substring(0, Buf[1] == '0' ? 1 : 2);
             else if (Mode != Canton && Buf.Length == 3) Buf = Buf.Substring(0, 2);
             AfterEdit();
             return true;
@@ -1036,15 +1151,85 @@ internal sealed class Engine
         State = St.Select;
     }
 
+    private void OpenLookupMenu()
+    {
+        Buf = "";
+        var labels = Lang == 0
+            ? new[] { "劃", "音", "部", "ㄅ", "Ａ", "﹡", "├", "１", "()" }
+            : new[] { "划", "音", "部", "あ", "α", "＊", "┅", "①", "()" };
+        OpenTexts("lookup-menu", labels.ToList(), "未有檢字方法");
+    }
+
+    private bool ChooseLookup(int key)
+    {
+        if (key == 1)
+        {
+            var strokes = Enumerable.Range(1, 26).Select(n => n.ToString()).Concat(new[] { ">27" }).ToList();
+            OpenTexts("stroke-count", strokes, "未有筆劃數目");
+        }
+        else if (key == 2)
+        {
+            int original = Mode;
+            SetMode(Pinyin);
+            previousLookupMode = original;
+        }
+        else if (key == 3)
+        {
+            var table = Data.Table(Lang, "RADDATA");
+            var radicals = Enumerable.Range(1, 999).Select(i => table.Get(i).FirstOrDefault()).ToList();
+            int last = radicals.FindLastIndex(ch => ch != null);
+            if (last >= 0) OpenTexts("radical-count", radicals.Take(last + 1).ToList(), "未有部首");
+        }
+        else return OpenLookupRow("SBDATA", key);
+        return true;
+    }
+
+    private bool OpenLookupRow(string table, int row)
+    {
+        var list = Data.Table(Lang, table).Get(row);
+        OpenTexts(table == "SBDATA" ? "sym" : "lookup-result", list, "沒有中文字供選用");
+        return true;
+    }
+
+    private bool OpenExtra(bool shape)
+    {
+        if (Buf.Length == 0 || Main.Get(Code()).Count == 0) { Beep(); return true; }
+        SetList(shape ? "shape-extra" : "sound-extra",
+            (shape ? Enumerable.Range(1, 9).Select(i => i.ToString()) :
+                PyInitialNames.Skip(1)).ToList(), false);
+        State = St.Select;
+        return true;
+    }
+
+    private bool FilterExtra(bool shape, int key)
+    {
+        if (shape && key == 0) { Beep(); return true; }
+        var filtered = Main.Get(Code()).Where(ch => ch != Tbl.Blank && Data.InExtraGroup(Lang, shape, key, ch)).ToList();
+        OpenTexts("code", filtered, "沒有中文字供選用");
+        return true;
+    }
+
     private void OpenPhrases()
     {
-        // 詞語 / 自定短句：自定詞語檔入面以最後上屏字開頭嘅詞，加上以關聯字組成嘅二字詞
-        var list = new List<string>();
-        foreach (string line in Data.UserLines(Lang, "Q9PHRASE.TXT"))
-            if (Last.Length == 0 || line.StartsWith(Last)) list.Add(line);
-        if (Last.Length > 0)
-            foreach (var rec in Data.Rel(Lang).Get(Last)) list.Add(Last + rec.Ch);
-        OpenTexts("phrase", list, "未有詞語");
+        // FUN_18000dd40 / FUN_18000eaa0：自定詞語先行，詞長 4 代表四字或以上。
+        var list = Data.UserLines(Lang, "Q9PHRASE.TXT").Concat(Data.Phrases(Lang))
+            .Where(phrase =>
+            {
+                if (Last.Length == 0) return true;
+                if (!phrase.StartsWith(Last, StringComparison.Ordinal)) return false;
+                int length = Elements(phrase.Substring(Last.Length)).Count;
+                return Math.Min(4, length) == phraseSuffixLength;
+            })
+            .ToList();
+        SetList("phrase", list, false);
+        State = St.Select;
+        if (list.Count == 0) Note = "未有詞語";
+    }
+
+    internal void CyclePhraseLength()
+    {
+        phraseSuffixLength = phraseSuffixLength % 4 + 1;
+        OpenPhrases();
     }
 
     private void OpenTexts(string kind, List<string> list, string empty)
@@ -1067,7 +1252,7 @@ internal sealed class Engine
     {
         string text = s;
         if (Kind == "phrase" && Last.Length > 0 && s.StartsWith(Last)) text = s.Substring(Last.Length);  // 首字已經上屏
-        bool single = Elements(s).Count == 1 && (Kind == "code" || Kind == "rel");
+        bool single = Elements(s).Count == 1 && (Kind == "code" || Kind == "rel" || Kind == "lookup-result");
         if (HalfPunct && (Kind == "punct" || Kind == "sym"))
         {
             string half;
@@ -1121,7 +1306,11 @@ internal sealed class Engine
         get
         {
             if (Mode == Number) return null;      // 數字模式由面板直接畫 1-9
-            if (State == St.Select) return Kind == "punct" ? "Q9_P.png" : Kind == "emojicat" ? "Q9_emoji.png" : null;
+            if (State == St.Select)
+            {
+                if (Kind == "shape-extra") return Lang == 0 ? "ShapeExtra.png" : "ShapeExtra_GB.png";
+                return Kind == "punct" ? "Q9_P.png" : Kind == "emojicat" ? "Q9_emoji.png" : null;
+            }
             if (NoChar)
                 return Mode == Glyph ? "Q9_N.png" : Mode == Stroke ? "q9stimNone.png" : Mode == Zhuyin ? "CYNONE.png" : "PYNONE.png";
             if (Mode == Glyph) return Buf.Length == 1 ? "Q9_" + Buf + ".png" : Buf.Length == 2 ? "Q9_D.png" : HasRelated ? "Q9_REL.png" : "Q9_0.png";
