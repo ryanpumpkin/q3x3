@@ -673,8 +673,8 @@ internal sealed class Engine
         return new[]
         {
             "筆劃﹕" + first(2) + " 字形﹕" + first(0),
-            // 資料係 CHANG1，原版顯示 CHANG (唔顯示聲調數字)
-            "拼音﹕" + new string(field(3).Where(c => c < '0' || c > '9').ToArray()) + " 劃數﹕" + field(1),
+            // 原版只顯示頭 5 個字元：CHANG1 → CHANG、SHUANG1 → SHUAN、TAO4 → TAO4 (原版截圖)
+            "拼音﹕" + (field(3).Length > 5 ? field(3).Substring(0, 5) : field(3)) + " 劃數﹕" + field(1),
             "內碼﹕" + hex + " 倉頡﹕" + field(5)
         };
     }
