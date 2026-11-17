@@ -607,16 +607,23 @@ internal sealed class Q9Panel : Form
             }
             if (select && !choosingMethod)
             {
-                float c = skin.Value("UI.CornerSize", 40) * s;
+                // FUN_1800b0580 / FUN_1800b55c0：每格四角三角形，格邊內縮 GridLine*，邊長 CornerSize，
+                // 用 GDI Polygon (NULL_PEN) 填 0xC0C0C1
+                g.Flush(FlushIntention.Sync);
+                Func<string, float, int> px = (k, d) => (int)(skin.Value("UI." + k, d) * s);
+                int l = px("GridLineLeft", 4), t = px("GridLineTop", 5), rr = px("GridLineRight", 3), bb = px("GridLineBottom", 0);
+                int cs = px("CornerSize", 40), w = CellPx;
                 for (int key = 1; key <= 9; key++)
                 {
                     if (engine.Cand[key - 1] == null) continue;
                     RectangleF r = Cell(key);
-                    g.FillPolygon(empty, new[] { new PointF(r.Left, r.Top), new PointF(r.Left + c, r.Top), new PointF(r.Left, r.Top + c) });
-                    g.FillPolygon(empty, new[] { new PointF(r.Right, r.Top), new PointF(r.Right - c, r.Top), new PointF(r.Right, r.Top + c) });
-                    g.FillPolygon(empty, new[] { new PointF(r.Left, r.Bottom), new PointF(r.Left + c, r.Bottom), new PointF(r.Left, r.Bottom - c) });
-                    g.FillPolygon(empty, new[] { new PointF(r.Right, r.Bottom), new PointF(r.Right - c, r.Bottom), new PointF(r.Right, r.Bottom - c) });
+                    int x = (int)r.X, y = (int)r.Y;
+                    Gdi.Polygon(textDc, Empty, new Point(x + l, y + t), new Point(x + l + cs, y + t), new Point(x + l, y + t + cs));
+                    Gdi.Polygon(textDc, Empty, new Point(x + w - rr, y + t), new Point(x + w - rr, y + t + cs), new Point(x + w - rr - cs, y + t));
+                    Gdi.Polygon(textDc, Empty, new Point(x + l, y + w - bb), new Point(x + l, y + w - bb - cs), new Point(x + l + cs, y + w - bb));
+                    Gdi.Polygon(textDc, Empty, new Point(x + w - rr, y + w - bb), new Point(x + w - rr - cs, y + w - bb), new Point(x + w - rr, y + w - bb - cs));
                 }
+                Gdi.GdiFlush();
             }
         }
         Draw(g, "Button09Transparent.png", input);
@@ -1209,6 +1216,20 @@ internal static class Gdi
     [DllImport("gdi32.dll")] private static extern IntPtr CreateSolidBrush(int color);
     [DllImport("user32.dll")] private static extern int FillRect(IntPtr dc, ref RECT r, IntPtr brush);
     [StructLayout(LayoutKind.Sequential)] private struct RECT { public int L, T, R, B; }
+
+    [DllImport("gdi32.dll")] private static extern bool Polygon(IntPtr dc, POINT[] points, int count);
+    [DllImport("gdi32.dll")] private static extern IntPtr GetStockObject(int obj);
+    [StructLayout(LayoutKind.Sequential)] private struct POINT { public int X, Y; }
+
+    // FUN_18010dd90：實心畫刷 + NULL_PEN 嘅 Polygon (右同下邊唔填)
+    internal static void Polygon(IntPtr dc, Color color, params Point[] points)
+    {
+        IntPtr brush = CreateSolidBrush(color.R | color.G << 8 | color.B << 16);
+        IntPtr oldBrush = SelectObject(dc, brush), oldPen = SelectObject(dc, GetStockObject(8));
+        Polygon(dc, points.Select(p => new POINT { X = p.X, Y = p.Y }).ToArray(), points.Length);
+        SelectObject(dc, oldPen); SelectObject(dc, oldBrush);
+        DeleteObject(brush);
+    }
 
     internal static void Fill(IntPtr dc, Color color, int x, int y, int w, int h)
     {
