@@ -457,7 +457,7 @@ internal sealed class Engine
         Data = data;
         statePath = Path.Combine(data.UserDir, "state.txt");
         LoadState();
-        Reset();
+        ResetQuiet();
     }
 
     // ---------- 狀態儲存 (重建版自己嘅檔案，不改動原版資料) ----------
@@ -657,6 +657,7 @@ internal sealed class Engine
             }
         // 次數多嘅排前，同次數保持原本次序 (原版逐格向上冒泡)
         var related = counts.Select((p, i) => new { p.Key, p.Value, i }).OrderByDescending(x => x.Value).ThenBy(x => x.i).Select(x => x.Key).ToList();
+        if (related.Count == 0) return related;          // 呢隻字冇關聯字：原版乜都唔顯示
         var page = related.Take(8).ToList();
         foreach (string filler in defaults)
         {
@@ -734,8 +735,15 @@ internal sealed class Engine
         return true;
     }
 
-    internal void SetMode(int mode) { Mode = mode; Reset(); }
-    internal void SetLang(int lang) { Lang = lang; Last = ""; Reset(); }
+    // 原版啱啱啟動或者轉輸入法時唔顯示關聯字，取消或者上字之後先出
+    internal void ResetQuiet()
+    {
+        Reset();
+        if (Kind == "rel") SetList("rel", new List<string>(), false);
+    }
+
+    internal void SetMode(int mode) { Mode = mode; ResetQuiet(); }
+    internal void SetLang(int lang) { Lang = lang; Last = ""; ResetQuiet(); }
 
     // ---------- 按鍵 ----------
     // 鍵值：'0'-'9' '.' '+' '-' '\b'。回傳 false 表示引擎冇處理 (交返俾應用程式)。

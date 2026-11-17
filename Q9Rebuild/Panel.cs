@@ -17,7 +17,7 @@ internal sealed class Settings
     private readonly Dictionary<string, int> values = new Dictionary<string, int>
     {
         { "Mode", 1 }, { "Lang", 0 }, { "Convert", 0 }, { "Size", 300 }, { "Opacity", 100 }, { "KeyMode", 0 },
-        { "RelMode", 1 }, { "DirectTopLeft", 1 }, { "HalfPunct", 0 }, { "Radical", 0 }, { "History", 0 },
+        { "RelMode", 2 }, { "Ver", 0 }, { "DirectTopLeft", 1 }, { "HalfPunct", 0 }, { "Radical", 0 }, { "History", 0 },
         { "Top", 0 }, { "ShiftToggle", 1 }, { "ModeNumber", 1 }, { "ModeEmoji", 1 },
         { "On1", 1 }, { "On2", 1 }, { "On3", 1 }, { "On4", 1 }, { "On5", 1 }
     };
@@ -120,12 +120,13 @@ internal sealed class Q9Panel : Form
         DoubleBuffered = true;
         ShowInTaskbar = false;
         StartPosition = FormStartPosition.Manual;
+        if (settings["Ver"] < 2) { settings["RelMode"] = 2; settings["Ver"] = 2; }   // 舊設定改用原版預設嘅動態關聯字
         engine.Mode = settings["Mode"]; engine.Lang = settings["Lang"];
         engine.OutputConvert = settings["Convert"] != 0; engine.RelMode = settings["RelMode"];
         engine.HalfPunct = settings["HalfPunct"] != 0; engine.RadicalFirst = settings["Radical"] != 0;
         engine.Output = Deliver;
         engine.Beep = delegate { if (!Capture_) Native.MessageBeep(0); };
-        engine.Reset();
+        engine.ResetQuiet();
         ApplySize();
         hookProc = HookCallback;
     }
@@ -183,16 +184,19 @@ internal sealed class Q9Panel : Form
     // Button09Transparent 嘅格線位置：三行 + 0 行
     private static readonly float[] RowEdges = { 0f, 0.2519f, 0.5037f, 0.759f, 1f };
 
+    // 原版 (FUN_1800b0700) 用整數格仔：格仔 = round(CellSize × 比例)，原點 = 輸入區左上角
+    private int CellPx { get { return (int)Math.Round(skin.Value("UI.CellSize", 150) * S); } }
+    private int X0 { get { return (int)(skin.Area("Q9_INPUT_AREA").X * S) - 1; } }
+    private int Y0 { get { return (int)Math.Round(skin.Area("Q9_INPUT_AREA").Y * S); } }
+
     private RectangleF Cell(int key)   // key 1-9，按數字鍵盤排位
     {
-        RectangleF a = Input;
-        int row = 2 - (key - 1) / 3, col = (key - 1) % 3;
-        float w = a.Width / 3;
-        return RectangleF.FromLTRB(a.X + col * w, a.Y + a.Height * RowEdges[row], a.X + (col + 1) * w, a.Y + a.Height * RowEdges[row + 1]);
+        int row = 2 - (key - 1) / 3, col = (key - 1) % 3, c = CellPx;
+        return new RectangleF(X0 + col * c, Y0 + row * c, c, c);
     }
 
-    private RectangleF ZeroKey { get { RectangleF a = Input; return RectangleF.FromLTRB(a.X, a.Y + a.Height * RowEdges[3], a.X + a.Width * 2 / 3, a.Bottom); } }
-    private RectangleF DotKey { get { RectangleF a = Input; return RectangleF.FromLTRB(a.X + a.Width * 2 / 3, a.Y + a.Height * RowEdges[3], a.Right, a.Bottom); } }
+    private RectangleF ZeroKey { get { int c = CellPx; return RectangleF.FromLTRB(X0, Y0 + 3 * c, X0 + 2 * c, Input.Bottom); } }
+    private RectangleF DotKey { get { int c = CellPx; return RectangleF.FromLTRB(X0 + 2 * c, Y0 + 3 * c, Input.Right, Input.Bottom); } }
 
     private static string ModeImage(int mode)
     {
@@ -259,7 +263,7 @@ internal sealed class Q9Panel : Form
     {
         if (engine.Lang != 0) return false;
         byte[] b = Dbcs.Encode(0, s);
-        if (b == null) return s.Length > 1 && char.IsSurrogate(s[0]);
+        if (b == null) return false;          // 表情符號等唔係 Big5 嘅字唔算
         int code = b[0] << 8 | b[1];
         return code < 0xA140 || (code >= 0xC6A1 && code < 0xC940) || code >= 0xF9D6;
     }
@@ -337,9 +341,22 @@ internal sealed class Q9Panel : Form
         }
     }
 
+    // 畫面先畫落 GDI DIB section：圖片用 GDI+、文字用 GDI ClearType，兩邊寫同一塊記憶體，效果同原版一樣
+    private Gdi.Surface frame;
+
     protected override void OnPaint(PaintEventArgs e)
     {
-        Graphics g = e.Graphics;
+        if (frame == null || frame.Width != ClientSize.Width || frame.Height != ClientSize.Height)
+        {
+            if (frame != null) frame.Dispose();
+            frame = new Gdi.Surface(Math.Max(1, ClientSize.Width), Math.Max(1, ClientSize.Height));
+        }
+        using (Graphics fg = Graphics.FromImage(frame.Bitmap)) PaintFrame(fg, frame.Dc);
+        e.Graphics.DrawImageUnscaled(frame.Bitmap, 0, 0);
+    }
+
+    private void PaintFrame(Graphics g, IntPtr textDc)
+    {
         g.InterpolationMode = InterpolationMode.HighQualityBicubic;
         g.PixelOffsetMode = PixelOffsetMode.HighQuality;
         float s = S;
@@ -397,11 +414,12 @@ internal sealed class Q9Panel : Form
         Draw(g, "Button17.png", Px(skin.Area("MESSAGE_AREA_HIDE")));
 
         // 文字：用 GDI (同原版一樣 TextOutW + 基線對齊)
-        IntPtr hdc = g.GetHdc();
-        try
+        g.Flush(System.Drawing.Drawing2D.FlushIntention.Sync);
+        IntPtr hdc = textDc;
+        Gdi.GdiFlush();
         {
             float adjH = skin.Value("UI.TextAdjustH", 36), adjV = skin.Value("UI.TextAdjustV", 105);
-            int big = Pt(skin.Value("UI.FontSize", 84)), rel = Pt(skin.Value("UI.RelTextFontSize", 72));
+            int big = Pt(skin.Value("UI.FontSize", 84)), rel = Pt(skin.Value("UI.RelTextFontSize", 72)) - 1;
             string face = FontFace;
             bool emojiList = engine.Kind == "emoji";
             if (select || engine.Mode == Engine.Number)
@@ -414,7 +432,7 @@ internal sealed class Q9Panel : Form
                     int len = Engine.Elements(t).Count;
                     int size = len <= 1 ? big : Math.Max(Pt(28), big * 2 / (len + 1));
                     Color color = Extended(t) ? Color.Red : Color.Black;
-                    Gdi.Text(hdc, t, emojiList ? "Segoe UI Emoji" : face, size, color, (int)(r.X + adjH * s), (int)(r.Y + adjV * s));
+                    Gdi.Text(hdc, t, emojiList ? "Segoe UI Emoji" : face, size, color, (int)r.X + (int)(adjH * s), (int)r.Y + (int)(adjV * s));
                 }
             }
             else if (engine.Kind == "rel" || engine.Kind == "code" || engine.Kind == "pyhint")
@@ -426,10 +444,10 @@ internal sealed class Q9Panel : Form
                     if (t == null) continue;
                     RectangleF r = Cell(key);
                     if (engine.Kind == "pyhint")
-                        Gdi.Text(hdc, t, face, big, Color.Black, (int)(r.X + adjH * s), (int)(r.Y + adjV * s));
+                        Gdi.Text(hdc, t, face, big, Color.Black, (int)r.X + (int)(adjH * s), (int)r.Y + (int)(adjV * s));
                     else
                         Gdi.Text(hdc, t, face, rel, Extended(t) ? Color.Red : color,
-                            (int)(r.X + skin.Value("UI.TopLeftTextAdjustH", 3) * s), (int)(r.Y + skin.Value("UI.TopLeftTextAdjustV", 69) * s));
+                            (int)r.X + (int)(skin.Value("UI.TopLeftTextAdjustH", 3) * s) + 1, (int)r.Y + (int)(skin.Value("UI.TopLeftTextAdjustV", 69) * s) + 2);
                 }
             }
             else if (engine.Kind == "emojicat")
@@ -439,38 +457,43 @@ internal sealed class Q9Panel : Form
 
             // 0 行標籤：兩隻字分開放喺 1、2 格位置
             RectangleF z = ZeroKey;
-            int baseY = (int)(z.Y + adjV * s);
+            int baseY = (int)z.Y + (int)(adjV * s);
             var label = Engine.Elements(key0);
             float key0Adj = skin.Value("UI.Key0AdjustH", -20);
-            if (label.Count > 0) Gdi.Text(hdc, label[0], face, big, Color.Black, (int)(z.X + (adjH + key0Adj) * s), baseY);
-            if (label.Count > 1) Gdi.Text(hdc, label[1], face, big, Color.Black, (int)(z.X + z.Width / 2 + adjH * s), baseY);
-            if (dot == "標點") Gdi.Text(hdc, dot, face, Pt(57), Color.Black, (int)(DotKey.X + 4 * s), (int)(DotKey.Y + 96 * s));
+            if (label.Count > 0) Gdi.Text(hdc, label[0], face, big, Color.Black, (int)z.X + (int)((adjH + key0Adj) * s), baseY);
+            if (label.Count > 1) Gdi.Text(hdc, label[1], face, big, Color.Black, (int)z.X + CellPx + (int)(adjH * s) - 1, baseY);
+            if (dot == "標點") Gdi.Text(hdc, dot, face, Pt(57), Color.Black, (int)DotKey.X + (int)(4 * s), (int)DotKey.Y + (int)(101 * s));
             else if (dot == ".") Gdi.Text(hdc, dot, face, big, Color.Black, (int)(DotKey.X + adjH * s), baseY);
 
             // 資料視窗：14px 細明體點陣字，白色
             RectangleF m = Px(skin.Area("MESSAGE_AREA"));
             if (paused) lines = new[] { "已暫停（按 Shift 恢復）" };
             else if (engine.Note.Length > 0) lines = new[] { engine.Note };
-            else if (engine.Mode == Engine.Canton && engine.State == St.Compose) lines = CantonLines();
+            else if (engine.Mode == Engine.Canton && engine.State == St.Compose) { DrawCanton(g, hdc, face, m); lines = null; }
             if (lines != null)
                 for (int i = 0; i < lines.Length; i++)
-                    Gdi.Text(hdc, lines[i], face, Pt(31), Color.White, (int)(m.X + 11 * s), (int)(m.Y + (64 + i * 57.5f) * s));
+                    Gdi.Text(hdc, lines[i], face, Pt(31) + 1, Color.White, (int)(m.X + 9 * s) + 1, (int)(m.Y + (64 + i * 57.5f) * s) + 1);
+            Gdi.GdiFlush();
         }
-        finally { g.ReleaseHdc(hdc); }
     }
 
-    private string[] CantonLines()
+    // 粵拼拼法清單：每頁三行，揀中嗰行淺色底黑字，右下角「+」提示可以轉 (原版畫面)
+    private void DrawCanton(Graphics g, IntPtr hdc, string face, RectangleF m)
     {
+        float s = S;
         var spell = data.CantonSpellings(engine.CantonKeys);
-        var result = new List<string>();
-        for (int i = 0; i < spell.Count && result.Count < 3; i++)
+        int choice = engine.CantonChoice, first = (choice - 1) / 3 * 3;
+        for (int row = 0; row < 3 && first + row < spell.Count; row++)
         {
-            int index = (engine.CantonChoice - 1) / 3 * 3 + result.Count;
-            if (index >= spell.Count) break;
-            string t = index == 0 ? spell[0] : spell[index];
-            result.Add((index + 1 == engine.CantonChoice ? "▶ " : "　") + t);
+            bool chosen = first + row + 1 == choice;
+            int x = (int)(m.X + 20 * s) + 1, baseline = (int)(m.Y + 64 * s) + 1 + (int)Math.Round(row * 56.5f * s);
+            if (chosen)
+            {
+                Gdi.Fill(hdc, Color.FromArgb(220, 231, 234), (int)(m.X + 17.8f * s), (int)(m.Y + 17.8f * s) + (int)Math.Round(row * 56.5f * s), (int)(299 * s), (int)(57 * s));
+            }
+            Gdi.Text(hdc, spell[first + row], face, Pt(31) + 1, chosen ? Color.Black : Color.White, x, baseline);
         }
-        return result.ToArray();
+        Gdi.Text(hdc, "+", face, Pt(44), Color.FromArgb(140, 140, 140), (int)(m.X + 398 * s), (int)(m.Y + 184 * s));
     }
 
     // ---------- 輸出 ----------
@@ -881,12 +904,63 @@ internal static class Gdi
     [DllImport("gdi32.dll")] private static extern int SetBkMode(IntPtr dc, int mode);
     [DllImport("gdi32.dll")] private static extern uint SetTextAlign(IntPtr dc, uint align);
     [DllImport("gdi32.dll", CharSet = CharSet.Unicode)] private static extern bool TextOutW(IntPtr dc, int x, int y, string text, int length);
+    [DllImport("gdi32.dll")] internal static extern bool GdiFlush();
+    [DllImport("gdi32.dll")] private static extern IntPtr CreateCompatibleDC(IntPtr dc);
+    [DllImport("gdi32.dll")] private static extern bool DeleteDC(IntPtr dc);
+    [DllImport("gdi32.dll")] private static extern IntPtr CreateDIBSection(IntPtr dc, ref BITMAPINFOHEADER info, uint usage, out IntPtr bits, IntPtr section, uint offset);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct BITMAPINFOHEADER
+    {
+        public int Size, Width, Height; public short Planes, BitCount; public int Compression, SizeImage, XPels, YPels, ClrUsed, ClrImportant;
+    }
+
+    // 32 位元 DIB section：GDI 用 Dc 畫字，GDI+ 用 Bitmap 畫圖，共用同一塊像素
+    internal sealed class Surface : IDisposable
+    {
+        internal readonly IntPtr Dc;
+        internal readonly Bitmap Bitmap;
+        internal readonly int Width, Height;
+        private readonly IntPtr dib, old;
+
+        internal Surface(int width, int height)
+        {
+            Width = width; Height = height;
+            var info = new BITMAPINFOHEADER { Size = 40, Width = width, Height = -height, Planes = 1, BitCount = 32 };
+            IntPtr bits;
+            Dc = CreateCompatibleDC(IntPtr.Zero);
+            dib = CreateDIBSection(Dc, ref info, 0, out bits, IntPtr.Zero, 0);
+            old = SelectObject(Dc, dib);
+            Bitmap = new Bitmap(width, height, width * 4, System.Drawing.Imaging.PixelFormat.Format32bppRgb, bits);
+        }
+
+        public void Dispose()
+        {
+            Bitmap.Dispose();
+            SelectObject(Dc, old);
+            DeleteObject(dib);
+            DeleteDC(Dc);
+        }
+    }
+
+    [DllImport("gdi32.dll")] private static extern IntPtr CreateSolidBrush(int color);
+    [DllImport("user32.dll")] private static extern int FillRect(IntPtr dc, ref RECT r, IntPtr brush);
+    [StructLayout(LayoutKind.Sequential)] private struct RECT { public int L, T, R, B; }
+
+    internal static void Fill(IntPtr dc, Color color, int x, int y, int w, int h)
+    {
+        var r = new RECT { L = x, T = y, R = x + w, B = y + h };
+        IntPtr brush = CreateSolidBrush(color.R | color.G << 8 | color.B << 16);
+        FillRect(dc, ref r, brush);
+        DeleteObject(brush);
+    }
 
     internal static void Text(IntPtr dc, string text, string face, int size, Color color, int x, int baseline)
     {
         if (string.IsNullOrEmpty(text) || size <= 0) return;
         uint charset = face == "Segoe UI Emoji" ? 1u : face == "SimSun" ? 0x86u : 0x88u;
-        IntPtr font = CreateFontW(size, 0, 0, 0, 400, 0, 0, 0, charset, 0, 0, 0, 0, face);
+        // 同原版 FUN_18010ef00 一樣：正數高度、OUT_TT_ONLY_PRECIS、CLEARTYPE_NATURAL_QUALITY
+        IntPtr font = CreateFontW(size, 0, 0, 0, 400, 0, 0, 0, charset, 7, 0, 6, 0, face);
         IntPtr old = SelectObject(dc, font);
         SetBkMode(dc, 1);                                  // TRANSPARENT
         SetTextAlign(dc, 24);                              // TA_BASELINE | TA_LEFT
