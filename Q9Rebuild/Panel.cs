@@ -360,7 +360,7 @@ internal sealed class Q9Panel : Form
     private static readonly Color RelatedFill = Color.FromArgb(203, 255, 255, 255);
     private static readonly Color Empty = Color.FromArgb(193, 192, 192);     // 0xC0C0C1
     private static readonly Color RelColor = Color.FromArgb(47, 47, 47);
-    private static readonly Color PreviewColor = Color.FromArgb(145, 72, 212);
+    private static readonly Color PreviewColor = Color.FromArgb(128, 40, 213);   // 0xd52880 (FUN_1800b0970)
 
     private string FontFace { get { return engine.Lang == 0 ? "MingLiU_HKSCS" : "SimSun"; } }
     private int Pt(float design) { return (int)Math.Round(design * S); }
@@ -649,7 +649,6 @@ internal sealed class Q9Panel : Form
         {
             float adjH = skin.Value("UI.TextAdjustH", 36), adjV = skin.Value("UI.TextAdjustV", 105);
             int big = Pt(skin.Value("UI.FontSize", 84)), rel = Pt(skin.Value("UI.RelTextFontSize", 72)) - 1;
-            int relatedBaseline = related ? -1 : 0;
             string face = FontFace;
             bool emojiList = engine.Kind == "emoji";
             if (select || engine.Mode == Engine.Number)
@@ -677,7 +676,7 @@ internal sealed class Q9Panel : Form
                         Gdi.Text(hdc, t, face, big, Color.Black, (int)r.X + (int)(adjH * s), (int)r.Y + (int)(adjV * s));
                     else
                         Gdi.Text(hdc, t, face, rel, Extended(t) ? Color.Red : color,
-                            (int)r.X + (int)(skin.Value("UI.TopLeftTextAdjustH", 3) * s) + 1, (int)r.Y + (int)(skin.Value("UI.TopLeftTextAdjustV", 69) * s) + 2 + relatedBaseline);
+                            (int)r.X + (int)(skin.Value("UI.TopLeftTextAdjustH", 3) * s) + 1, (int)r.Y + (int)(skin.Value("UI.TopLeftTextAdjustV", 69) * s) + 1);   // 關聯字、預覽字同一位置 (原版截圖)
                 }
             }
             else if (engine.Kind == "emojicat")
@@ -732,14 +731,15 @@ internal sealed class Q9Panel : Form
         for (int row = 0; row < 3 && first + row < spell.Count; row++)
         {
             bool chosen = first + row + 1 == choice;
-            int x = (int)(m.X + 20 * s) + 1, baseline = (int)(m.Y + 64 * s) + 1 + (int)Math.Round(row * 56.5f * s);
+            int x = (int)(m.X + 20 * s) + 2, baseline = (int)(m.Y + 64 * s) + 1 + (int)Math.Round(row * 58f * s);
             if (chosen)
             {
-                Gdi.Fill(hdc, Color.FromArgb(220, 231, 234), (int)(m.X + 17.8f * s), (int)(m.Y + 17.8f * s) + (int)Math.Round(row * 56.5f * s), (int)(299 * s), (int)(57 * s));
+                Gdi.Fill(hdc, Color.FromArgb(220, 231, 234), (int)(m.X + 17.8f * s), (int)(m.Y + 17.8f * s) + (int)Math.Round(row * 58f * s), (int)(299 * s), (int)(58 * s));
             }
             Gdi.Text(hdc, spell[first + row], face, Pt(31) + 1, chosen ? Color.Black : Color.White, x, baseline);
         }
-        Gdi.Text(hdc, "+", face, Pt(44), Color.FromArgb(140, 140, 140), (int)(m.X + 398 * s), (int)(m.Y + 184 * s));
+        // 「+」原版有 ClearType 彩邊，字型未搞清楚；呢個位置最接近 (原版截圖)
+        Gdi.Text(hdc, "+", face, Pt(44), Color.FromArgb(140, 140, 140), (int)(m.X + 398 * s) + 1, (int)(m.Y + 184 * s) - 2);
     }
 
     // ---------- 輸出 ----------
