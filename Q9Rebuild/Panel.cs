@@ -672,6 +672,10 @@ internal sealed class Q9Panel : Form
     protected override void OnMouseMove(MouseEventArgs e)
     {
         base.OnMouseMove(e);
+        // 可以拖動嘅位置顯示四向箭咀 (原版 IDC_SIZEALL)，按鈕上面用普通箭咀
+        PointF p = Unit(e.Location);
+        Cursor want = dragging || !Buttons.Any(name => Px(skin.Area(name)).Contains(p)) ? Cursors.SizeAll : Cursors.Default;
+        if (Cursor != want) Cursor = want;
         if (!dragging) return;
         Point screen = PointToScreen(e.Location);
         Location = new Point(screen.X - dragOrigin.X, screen.Y - dragOrigin.Y);
