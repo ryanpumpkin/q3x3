@@ -204,8 +204,8 @@ internal sealed class Q9Panel : Form
     {
         get
         {
-            // 關聯字頁嘅格線用皮膚圖片原有比例。
-            Image gridLines = ShowingRelated ? skin.Get("Button09Transparent.png") : null;
+            // 靜止時 (原版畫 Button09) 格線同底圖用皮膚圖片原大、整數原點；同原版截圖逐像素對過。
+            Image gridLines = engine.State == St.Idle && engine.Mode != Engine.Number ? skin.Get("Button09Transparent.png") : null;
             if (gridLines == null) return Px(skin.Area("Q9_INPUT_AREA"));
             float scale = (float)ClientSize.Width / skin.Get("q9.png").Width;
             return new RectangleF(X0, Y0, gridLines.Width * scale, gridLines.Height * scale);
@@ -254,10 +254,21 @@ internal sealed class Q9Panel : Form
 
     private int NextModeValue { get { var order = ModeCycle(); return order[(order.IndexOf(engine.Mode) + 1) % order.Count]; } }
 
+    // 同原版截圖對比，四捨五入比截斷吻合 (工具列差異 4.1% 對 5.0%)
+    private static int DrawRound(float v) { return (int)Math.Round(v); }
+
     private void Draw(Graphics g, string image, RectangleF area)
     {
         Image img = skin.Get(image);
-        if (img != null) g.DrawImage(img, area);
+        if (img == null) return;
+        // 原版 (FUN_18010d2e0) 用 BitBlt 將皮膚圖原大畫喺整數位置；圖嘅大細同範圍差唔多就唔好縮放
+        if (Math.Abs(img.Width - area.Width) <= 1.5f && Math.Abs(img.Height - area.Height) <= 1.5f)
+        {
+            int x = DrawRound(area.X), y = DrawRound(area.Y);
+            g.DrawImage(img, new Rectangle(x, y, img.Width, img.Height), 0, 0, img.Width, img.Height, GraphicsUnit.Pixel);
+            return;
+        }
+        g.DrawImage(img, area);
     }
 
     // 「取消」用原版 Button09.png 入面嘅字 (淨係攞字，唔要白底)
@@ -509,10 +520,12 @@ internal sealed class Q9Panel : Form
         bool select = engine.State == St.Select && engine.Kind != "emojicat" && engine.Kind != "punct" && engine.Kind != "shape-extra";
         bool choosingMethod = engine.Kind == "lookup-menu" || engine.Kind == "stroke-count"
             || engine.Kind == "radical-count" || engine.Kind == "sound-extra";
-        // 上字後嘅關聯字頁用半透明白底，保留皮膚圖案；取碼同選字頁仍用實色。
+        // 靜止時 (有冇關聯字都係) 原版畫 Button09.png (白色 alpha 204，FUN_1800b0970 圖 1 → 資源 514)，
+        // 保留皮膚圖案；取碼同選字頁仍用實色。
         bool related = ShowingRelated;
+        bool idleGrid = engine.State == St.Idle && engine.Mode != Engine.Number;
         string image = engine.Image;
-        using (var fill = new SolidBrush(related ? RelatedFill : Fill))
+        using (var fill = new SolidBrush(idleGrid ? RelatedFill : Fill))
         using (var empty = new SolidBrush(Empty))
         {
             g.FillRectangle(fill, input);
