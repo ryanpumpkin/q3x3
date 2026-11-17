@@ -228,6 +228,17 @@ internal sealed class Q9Panel : Form
     }
 
     private RectangleF ZeroKey { get { int c = CellPx; return RectangleF.FromLTRB(X0, Y0 + 3 * c, X0 + 2 * c, Input.Bottom); } }
+    // FUN_1800b0700 格 1-9：格邊內縮 GridLineLeft/Top，右下減 GridLineRight/Bottom (Polygon 唔包右下邊)
+    private Rectangle GrayCell(int key)
+    {
+        float s = S;
+        RectangleF r = Cell(key);
+        int l = (int)(skin.Value("UI.GridLineLeft", 4) * s), t = (int)(skin.Value("UI.GridLineTop", 5) * s);
+        int rr = (int)(skin.Value("UI.GridLineRight", 3) * s), bb = (int)(skin.Value("UI.GridLineBottom", 0) * s);
+        int c = CellPx;
+        return new Rectangle((int)r.X + l, (int)r.Y + t, c - l - rr, c - t - bb);
+    }
+
     // FUN_1800b0700 格 10：0 行「.」格加 KeyReset* 皮膚值調整 (換算方法照原版截圖揀)
     private Rectangle DotBox
     {
@@ -595,10 +606,9 @@ internal sealed class Q9Panel : Form
             else g.FillRectangle(fill, input);
             for (int key = 1; key <= 9; key++)
             {
-                bool blank = select && engine.Cand[key - 1] == null
-                    || key == 7 && (image == "PY0.png" || image == "PYREL.png" || image == "PYNONE.png")
-                    || PinyinDisabled(key);
-                if (blank) g.FillRectangle(empty, Cell(key));
+                // PY0 / PYREL / PYNONE 本身已經畫咗 7 鍵灰格 (有圓角)，唔使另外填
+                bool blank = select && engine.Cand[key - 1] == null || PinyinDisabled(key);
+                if (blank) g.FillRectangle(empty, GrayCell(key));
             }
             if (image != null)
             {
