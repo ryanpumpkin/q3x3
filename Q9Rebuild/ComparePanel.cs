@@ -31,7 +31,7 @@ internal static class ComparePanel
                 panel.Capture_ = true;
                 foreach (char key in keys)
                 {
-                    int mode = "SGPZC".IndexOf(key) + 1;
+                    int mode = "SGPZCNE".IndexOf(key) + 1;   // N 數字、E 表情符號
                     if (mode > 0) panel.SetModeForPreview(mode);
                     else panel.Press(key == 'b' ? '\b' : key);
                 }

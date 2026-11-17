@@ -206,7 +206,7 @@ internal sealed class Q9Panel : Form
         get
         {
             // 靜止時 (原版畫 Button09) 格線同底圖用皮膚圖片原大、整數原點；同原版截圖逐像素對過。
-            Image gridLines = engine.Mode != Engine.Number ? skin.Get("Button09Transparent.png") : null;
+            Image gridLines = skin.Get("Button09Transparent.png");
             if (gridLines == null) return Px(skin.Area("Q9_INPUT_AREA"));
             float scale = (float)ClientSize.Width / skin.Get("q9.png").Width;
             return new RectangleF(X0, Y0, gridLines.Width * scale, gridLines.Height * scale);
@@ -595,7 +595,7 @@ internal sealed class Q9Panel : Form
         // 保留皮膚圖案；取碼同選字頁仍用實色。
         bool related = ShowingRelated;
         bool idleGrid = engine.State == St.Idle && engine.Mode != Engine.Number;
-        bool useButton09 = !related && engine.Mode != Engine.Number;
+        bool useButton09 = !related;   // 數字模式都係 (原版截圖)
         string image = engine.Image;
         using (var fill = new SolidBrush(idleGrid ? RelatedFill : Fill))
         using (var empty = new SolidBrush(Empty))
@@ -661,7 +661,9 @@ internal sealed class Q9Panel : Form
                     int len = Engine.Elements(t).Count;
                     int size = len <= 1 ? big : Math.Max(Pt(28), big * 2 / (len + 1));
                     Color color = Extended(t) ? Color.Red : Color.Black;
-                    Gdi.Text(hdc, t, emojiList ? "Segoe UI Emoji" : face, size, color, (int)r.X + (int)(adjH * s), (int)r.Y + (int)(adjV * s));
+                    // 數字模式：半形數字向右移半個字闊 (原版截圖)
+                    int numShift = engine.Mode == Engine.Number ? big / 2 : 0;
+                    Gdi.Text(hdc, t, emojiList ? "Segoe UI Emoji" : face, size, color, (int)r.X + (int)(adjH * s) + numShift, (int)r.Y + (int)(adjV * s));
                 }
             }
             else if (engine.Kind == "rel" || engine.Kind == "code" || engine.Kind == "pyhint")
@@ -698,7 +700,7 @@ internal sealed class Q9Panel : Form
                 for (int i = 0; i < 3; i++) Gdi.Text(hdc, label[i], face, big, Color.Black, x0 + (x1 - x0) * i / 2, baseY);
             else
             {
-                if (label.Count > 0) Gdi.Text(hdc, label[0], face, big, Color.Black, x0, baseY);
+                if (label.Count > 0) Gdi.Text(hdc, label[0], face, big, Color.Black, x0 + (engine.Mode == Engine.Number ? big / 2 : 0), baseY);
                 if (label.Count > 1) Gdi.Text(hdc, label[1], face, big, Color.Black, x1, baseY);
             }
             if (dot == "標點" || dot == "韻母")
@@ -708,7 +710,13 @@ internal sealed class Q9Panel : Form
                 // 字高 = 格 ÷ 2.5 (FUN_1800b6380 等：(short)((double)格 / 2.5))
                 Gdi.Text(hdc, dot, face, (int)(CellPx / 2.5), Color.Black, (int)DotKey.X + (int)(4 * s) - 1, (int)DotKey.Y + (int)(101 * s));
             }
-            else if (dot == ".") Gdi.Text(hdc, dot, face, big, Color.Black, (int)(DotKey.X + adjH * s), baseY);
+            else if (dot == ".")
+            {
+                // 數字模式：「.」格先用 kFillBlankColor 填 (遮住 Button09 嘅「取消」，範圍同關聯字頁細格一樣)
+                if (engine.Mode == Engine.Number) Gdi.Fill(hdc, Fill, DotBox.X, DotBox.Y, DotBox.Width, DotBox.Height);
+                int dx = engine.Mode == Engine.Number ? -6 : 0, dy = engine.Mode == Engine.Number ? -2 : 0;   // 原版截圖 (大細 300)
+                Gdi.Text(hdc, dot, face, big, Color.Black, (int)(DotKey.X + adjH * s) + dx, baseY + dy);
+            }
 
             // 資料視窗：14px 細明體點陣字，白色
             RectangleF m = Px(skin.Area("MESSAGE_AREA"));
