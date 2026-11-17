@@ -913,7 +913,9 @@ internal sealed class Engine
         if (k == '+' || k == '-')
         {
             int count = Data.CantonSpellings(keys).Count, choice = CantonChoice;
-            choice = k == '+' ? choice % count + 1 : (choice + count - 2) % count + 1;
+            // 原版 FUN_1800b9320：加號由尾返到第一項，減號喺第一項停低。
+            if (k == '-' && choice == 1) return true;
+            choice = k == '+' ? choice % count + 1 : choice - 1;
             Buf = keys + choice; AfterEdit();
             return true;
         }
@@ -1214,7 +1216,7 @@ internal sealed class Engine
                 var parts = new List<string>();
                 for (int i = 0; i < spell.Count; i++)
                 {
-                    string s = i == 0 ? "全部" : spell[i];
+                    string s = i == 0 && spell[i] == CantonKeys ? "全部" : spell[i];
                     parts.Add(i + 1 == CantonChoice ? "[" + s + "]" : s);
                 }
                 return string.Join(" ", parts);

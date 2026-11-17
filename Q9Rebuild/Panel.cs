@@ -179,7 +179,18 @@ internal sealed class Q9Panel : Form
     }
 
     private RectangleF Px(RectangleF design) { float s = S; return new RectangleF(design.X * s, design.Y * s, design.Width * s, design.Height * s); }
-    private RectangleF Input { get { return Px(skin.Area("Q9_INPUT_AREA")); } }
+    private bool ShowingRelated { get { return engine.State == St.Idle && engine.HasRelated; } }
+    private RectangleF Input
+    {
+        get
+        {
+            // 關聯字頁嘅格線用皮膚圖片原有比例。
+            Image gridLines = ShowingRelated ? skin.Get("Button09Transparent.png") : null;
+            if (gridLines == null) return Px(skin.Area("Q9_INPUT_AREA"));
+            float scale = (float)ClientSize.Width / skin.Get("q9.png").Width;
+            return new RectangleF(X0, Y0, gridLines.Width * scale, gridLines.Height * scale);
+        }
+    }
 
     // Button09Transparent 嘅格線位置：三行 + 0 行
     private static readonly float[] RowEdges = { 0f, 0.2519f, 0.5037f, 0.759f, 1f };
@@ -251,6 +262,7 @@ internal sealed class Q9Panel : Form
     }
 
     private static readonly Color Fill = Color.FromArgb(222, 205, 206);      // kFillBlankColor
+    private static readonly Color RelatedFill = Color.FromArgb(203, 255, 255, 255);
     private static readonly Color Empty = Color.FromArgb(193, 192, 192);     // 0xC0C0C1
     private static readonly Color RelColor = Color.FromArgb(47, 47, 47);
     private static readonly Color PreviewColor = Color.FromArgb(145, 72, 212);
@@ -378,8 +390,10 @@ internal sealed class Q9Panel : Form
         // 九宮格：格仔底色 → 底圖 → 四角三角 → 格線
         RectangleF input = Input;
         bool select = engine.State == St.Select && engine.Kind != "emojicat" && engine.Kind != "punct";
+        // 上字後嘅關聯字頁用半透明白底，保留皮膚圖案；取碼同選字頁仍用實色。
+        bool related = ShowingRelated;
         string image = engine.Image;
-        using (var fill = new SolidBrush(Fill))
+        using (var fill = new SolidBrush(related ? RelatedFill : Fill))
         using (var empty = new SolidBrush(Empty))
         {
             g.FillRectangle(fill, input);
@@ -421,6 +435,7 @@ internal sealed class Q9Panel : Form
         {
             float adjH = skin.Value("UI.TextAdjustH", 36), adjV = skin.Value("UI.TextAdjustV", 105);
             int big = Pt(skin.Value("UI.FontSize", 84)), rel = Pt(skin.Value("UI.RelTextFontSize", 72)) - 1;
+            int relatedBaseline = related ? -1 : 0;
             string face = FontFace;
             bool emojiList = engine.Kind == "emoji";
             if (select || engine.Mode == Engine.Number)
@@ -448,7 +463,7 @@ internal sealed class Q9Panel : Form
                         Gdi.Text(hdc, t, face, big, Color.Black, (int)r.X + (int)(adjH * s), (int)r.Y + (int)(adjV * s));
                     else
                         Gdi.Text(hdc, t, face, rel, Extended(t) ? Color.Red : color,
-                            (int)r.X + (int)(skin.Value("UI.TopLeftTextAdjustH", 3) * s) + 1, (int)r.Y + (int)(skin.Value("UI.TopLeftTextAdjustV", 69) * s) + 2);
+                            (int)r.X + (int)(skin.Value("UI.TopLeftTextAdjustH", 3) * s) + 1, (int)r.Y + (int)(skin.Value("UI.TopLeftTextAdjustV", 69) * s) + 2 + relatedBaseline);
                 }
             }
             else if (engine.Kind == "emojicat")
@@ -458,12 +473,12 @@ internal sealed class Q9Panel : Form
 
             // 0 行標籤：兩隻字分開放喺 1、2 格位置
             RectangleF z = ZeroKey;
-            int baseY = (int)z.Y + (int)(adjV * s);
+            int baseY = (int)z.Y + (int)(adjV * s) + relatedBaseline;
             var label = Engine.Elements(key0);
             float key0Adj = skin.Value("UI.Key0AdjustH", -20);
             if (label.Count > 0) Gdi.Text(hdc, label[0], face, big, Color.Black, (int)z.X + (int)((adjH + key0Adj) * s), baseY);
             if (label.Count > 1) Gdi.Text(hdc, label[1], face, big, Color.Black, (int)z.X + CellPx + (int)(adjH * s) - 1, baseY);
-            if (dot == "標點" || dot == "韻母") Gdi.Text(hdc, dot, face, Pt(57), Color.Black, (int)DotKey.X + (int)(4 * s), (int)DotKey.Y + (int)(101 * s));
+            if (dot == "標點" || dot == "韻母") Gdi.Text(hdc, dot, face, Pt(57), Color.Black, (int)DotKey.X + (int)(4 * s), (int)DotKey.Y + (int)(101 * s) + relatedBaseline);
             else if (dot == ".") Gdi.Text(hdc, dot, face, big, Color.Black, (int)(DotKey.X + adjH * s), baseY);
 
             // 資料視窗：14px 細明體點陣字，白色
@@ -1103,8 +1118,12 @@ internal static class Program
         // 粵拼：陳 = c h a n，揀第 3 個拼法 chan
         engine.SetMode(Engine.Canton);
         Keys(engine, "8486"); Check(engine.CodeText.StartsWith("[全部]"), "粵拼拼法清單");
+        Keys(engine, "-"); Check(engine.CantonChoice == 1, "粵拼首個拼法按減號");
         Keys(engine, "++"); Check(engine.CodeText.EndsWith("[chan]"), "粵拼揀拼法");
         Keys(engine, "0"); Check(engine.Cand.Contains("陳") && !engine.Cand.Contains("參"), "粵拼 陳");
+        engine.SetMode(Engine.Canton);
+        Keys(engine, "33"); Check(engine.CodeText == "[zy]", "粵拼單一拼法 zy");
+        Keys(engine, "0"); Check(engine.Cand.SequenceEqual(new[] { "渚", "拄", "箸", null, null, null, null, null, null }), "粵拼 zy 候選次序");
         Keys(engine, "."); engine.SetLang(1);
         Keys(engine, "84860"); Check(engine.Cand.Contains("陈"), "簡體粵拼");
         Keys(engine, "."); engine.SetMode(Engine.Zhuyin);
