@@ -328,7 +328,8 @@ internal sealed class Q9Panel : Form
             return;
         }
         // 靜止
-        if (hasRel) { key0 = "選字"; dot = "標點"; } else key0 = mode == Engine.Zhuyin ? "韻母" : "標點";
+        // 有關聯字時「.」對調做「0」：注音即係冇聲母 (韻母)，其他輸入法係標點
+        if (hasRel) { key0 = "選字"; dot = mode == Engine.Zhuyin ? "韻母" : "標點"; } else key0 = mode == Engine.Zhuyin ? "韻母" : "標點";
         lines = engine.InfoLines();
         if (lines != null) return;
         switch (mode)
@@ -462,7 +463,7 @@ internal sealed class Q9Panel : Form
             float key0Adj = skin.Value("UI.Key0AdjustH", -20);
             if (label.Count > 0) Gdi.Text(hdc, label[0], face, big, Color.Black, (int)z.X + (int)((adjH + key0Adj) * s), baseY);
             if (label.Count > 1) Gdi.Text(hdc, label[1], face, big, Color.Black, (int)z.X + CellPx + (int)(adjH * s) - 1, baseY);
-            if (dot == "標點") Gdi.Text(hdc, dot, face, Pt(57), Color.Black, (int)DotKey.X + (int)(4 * s), (int)DotKey.Y + (int)(101 * s));
+            if (dot == "標點" || dot == "韻母") Gdi.Text(hdc, dot, face, Pt(57), Color.Black, (int)DotKey.X + (int)(4 * s), (int)DotKey.Y + (int)(101 * s));
             else if (dot == ".") Gdi.Text(hdc, dot, face, big, Color.Black, (int)(DotKey.X + adjH * s), baseY);
 
             // 資料視窗：14px 細明體點陣字，白色
