@@ -206,7 +206,7 @@ internal sealed class Q9Panel : Form
         get
         {
             // 靜止時 (原版畫 Button09) 格線同底圖用皮膚圖片原大、整數原點；同原版截圖逐像素對過。
-            Image gridLines = engine.State == St.Idle && engine.Mode != Engine.Number ? skin.Get("Button09Transparent.png") : null;
+            Image gridLines = engine.Mode != Engine.Number ? skin.Get("Button09Transparent.png") : null;
             if (gridLines == null) return Px(skin.Area("Q9_INPUT_AREA"));
             float scale = (float)ClientSize.Width / skin.Get("q9.png").Width;
             return new RectangleF(X0, Y0, gridLines.Width * scale, gridLines.Height * scale);
@@ -228,6 +228,23 @@ internal sealed class Q9Panel : Form
     }
 
     private RectangleF ZeroKey { get { int c = CellPx; return RectangleF.FromLTRB(X0, Y0 + 3 * c, X0 + 2 * c, Input.Bottom); } }
+    // FUN_1800b0700 格 10：0 行「.」格加 KeyReset* 皮膚值調整 (換算方法照原版截圖揀)
+    private Rectangle DotBox
+    {
+        get
+        {
+            float s = S;
+            Func<string, float, float> v = (k, d) => skin.Value("UI." + k, d) * s;
+            int c = CellPx;
+            int x0 = X0 + 2 * c + (int)v("KeyResetAdjustH", 12) + (int)v("GridLineLeft", 4);
+            int y0 = Y0 + 3 * c + (int)v("KeyResetAdjustV", 30) + (int)v("GridLineTop", 5);
+            // FUN_18010dd90 用 Polygon 填；闊高按原版截圖 (大細 300：x 157-209、y 285-326)
+            int w = c + (int)v("KeyResetWidthAdjust", -30) - (int)v("GridLineRight", 3) - (int)Math.Round(v("GridLineLeft", 4)) + 1;
+            int h = c + (int)v("KeyResetHeightAdjust", -54) - (int)v("GridLineBottom", 0) - (int)v("GridLineTop", 5);
+            return new Rectangle(x0, y0, w, h);
+        }
+    }
+
     private RectangleF DotKey { get { int c = CellPx; return RectangleF.FromLTRB(X0 + 2 * c, Y0 + 3 * c, Input.Right, Input.Bottom); } }
 
     private static string ModeImage(int mode)
@@ -296,9 +313,9 @@ internal sealed class Q9Panel : Form
         // 原版 (FUN_18010d2e0) 用 BitBlt 將皮膚圖原大畫喺整數位置；圖嘅大細同範圍差唔多就唔好縮放
         if (Math.Abs(img.Width - area.Width) <= 1.5f && Math.Abs(img.Height - area.Height) <= 1.5f)
         {
-            // 位置 = floor(設計座標 × (闊度 + 3) / SkinWidth)：同原版截圖逐個掣對過
-            // (九方掣、↵、简、−、+ 嘅 x / y 全部吻合；用 S 四捨五入會差 1-2 像素)
-            float s = S, s2 = (ClientSize.Width + 3) / skin.Width;
+            // 位置 = floor(設計座標 × a)：同原版截圖逐個掣對過，a 要喺 [0.45641, 0.45691]
+            // (九方掣、↵、简、−、+、底部收起掣嘅 x / y 全部吻合)，用 (闊度+1)/(SkinWidth−5) = 300/657
+            float s = S, s2 = (ClientSize.Width + 1) / (skin.Width - 5);
             int x = (int)(area.X / s * s2), y = (int)(area.Y / s * s2);
             if (frame != null && BlendExact(g, frame.Bitmap, (Bitmap)img, x, y)) return;
             g.DrawImage(img, new Rectangle(x, y, img.Width, img.Height), 0, 0, img.Width, img.Height, GraphicsUnit.Pixel);
@@ -328,7 +345,7 @@ internal sealed class Q9Panel : Form
     }
 
     private static readonly Color ColorKey = Color.FromArgb(192, 192, 192);  // 原版 SetLayeredWindowAttributes 0xC0C0C0
-    private static readonly Color Fill = Color.FromArgb(222, 205, 206);      // kFillBlankColor
+    private static readonly Color Fill = Color.FromArgb(223, 204, 205);      // kFillBlankColor 13487327 = COLORREF 0xCDCCDF
     private static readonly Color RelatedFill = Color.FromArgb(203, 255, 255, 255);
     private static readonly Color Empty = Color.FromArgb(193, 192, 192);     // 0xC0C0C1
     private static readonly Color RelColor = Color.FromArgb(47, 47, 47);
@@ -567,12 +584,14 @@ internal sealed class Q9Panel : Form
         // 保留皮膚圖案；取碼同選字頁仍用實色。
         bool related = ShowingRelated;
         bool idleGrid = engine.State == St.Idle && engine.Mode != Engine.Number;
+        bool useButton09 = !related && engine.Mode != Engine.Number;
         string image = engine.Image;
         using (var fill = new SolidBrush(idleGrid ? RelatedFill : Fill))
         using (var empty = new SolidBrush(Empty))
         {
-            // 靜止冇關聯字：原版直接畫 Button09.png (白色 alpha 204 連「取消」)
-            if (idleGrid && !related) Draw(g, "Button09.png", input);
+            // FUN_1800b0970 每個狀態都先畫圖 1 (Button09.png，白色 alpha 204 連「取消」)；
+            // 關聯字頁另外處理 (原版用 kFillBlankColor 填 0 行)
+            if (useButton09) Draw(g, "Button09.png", input);
             else g.FillRectangle(fill, input);
             for (int key = 1; key <= 9; key++)
             {
@@ -601,7 +620,7 @@ internal sealed class Q9Panel : Form
             }
         }
         Draw(g, "Button09Transparent.png", input);
-        if (dot == "取消" && !(idleGrid && !related)) g.DrawImage(CancelText, input);
+        if (dot == "取消" && !useButton09) g.DrawImage(CancelText, input);
 
         // 資料視窗下面嘅收起掣
         Draw(g, "Button17.png", Px(skin.Area("MESSAGE_AREA_HIDE")));
@@ -651,7 +670,7 @@ internal sealed class Q9Panel : Form
 
             // 0 行標籤：兩隻字分開放喺 1、2 格位置
             RectangleF z = ZeroKey;
-            int baseY = (int)z.Y + (int)(adjV * s) + relatedBaseline;
+            int baseY = (int)z.Y + (int)(adjV * s);   // 原版截圖：關聯字頁 0 行標籤唔使上移
             var label = Engine.Elements(key0);
             float key0Adj = skin.Value("UI.Key0AdjustH", -20);
             int x0 = (int)z.X + (int)((adjH + key0Adj) * s), x1 = (int)z.X + CellPx + (int)(adjH * s) - 1;
@@ -666,7 +685,13 @@ internal sealed class Q9Panel : Form
                 if (label.Count > 0) Gdi.Text(hdc, label[0], face, big, Color.Black, x0, baseY);
                 if (label.Count > 1) Gdi.Text(hdc, label[1], face, big, Color.Black, x1, baseY);
             }
-            if (dot == "標點" || dot == "韻母") Gdi.Text(hdc, dot, face, Pt(57), Color.Black, (int)DotKey.X + (int)(4 * s), (int)DotKey.Y + (int)(101 * s) + relatedBaseline);
+            if (dot == "標點" || dot == "韻母")
+            {
+                // 有關聯字：FUN_1800b0700 (格 10) 先用 kFillBlankColor 填細格 (原版截圖逐像素對過)
+                if (related) Gdi.Fill(hdc, Fill, DotBox.X, DotBox.Y, DotBox.Width, DotBox.Height);
+                // 字高 = 格 ÷ 2.5 (FUN_1800b6380 等：(short)((double)格 / 2.5))
+                Gdi.Text(hdc, dot, face, (int)(CellPx / 2.5), Color.Black, (int)DotKey.X + (int)(4 * s) - 1, (int)DotKey.Y + (int)(101 * s));
+            }
             else if (dot == ".") Gdi.Text(hdc, dot, face, big, Color.Black, (int)(DotKey.X + adjH * s), baseY);
 
             // 資料視窗：14px 細明體點陣字，白色
