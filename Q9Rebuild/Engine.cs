@@ -560,6 +560,29 @@ internal sealed class Q9Data
         return t;
     }
 
+    // Another process (the standalone panel, or the normal and administrator TSF hosts) may
+    // have saved newer learned orders; drop the cached copies so they are read again.
+    internal void ForgetUserTables()
+    {
+        foreach (string name in UserTableFiles.Keys)
+            for (int lang = 0; lang < 2; lang++) tables.Remove(Prefix(lang) + name);
+    }
+
+    // Latest write time of this rebuild's own saved state and tables.
+    internal DateTime UserStamp()
+    {
+        if (!Directory.Exists(UserDir)) return DateTime.MinValue;
+        DateTime latest = DateTime.MinValue;
+        foreach (string path in Directory.GetFiles(UserDir))
+        {
+            string name = Path.GetFileName(path);
+            if (name != "state.txt" && !name.EndsWith(".tbl", StringComparison.OrdinalIgnoreCase)) continue;
+            DateTime time = File.GetLastWriteTimeUtc(path);
+            if (time > latest) latest = time;
+        }
+        return latest;
+    }
+
     internal void SaveTable(int lang, string name)
     {
         Tbl t;
@@ -893,8 +916,24 @@ internal sealed class Engine
     {
         Data = data;
         statePath = Path.Combine(data.UserDir, "state.txt");
+        loadedStamp = data.UserStamp();
         LoadState();
         ResetQuiet();
+    }
+
+    private DateTime loadedStamp;
+
+    // Called when this panel gains focus: pick up what another process saved since we loaded.
+    // Unsaved changes of our own win; they are written when the panel loses focus.
+    internal void SyncFromDisk()
+    {
+        if (StateDirty) return;
+        DateTime stamp = Data.UserStamp();
+        if (stamp <= loadedStamp) return;
+        learnedRel.Clear();
+        LoadState();
+        Data.ForgetUserTables();
+        loadedStamp = stamp;
     }
 
     // ---------- 狀態儲存 (重建版自己嘅檔案，不改動原版資料) ----------
@@ -953,6 +992,7 @@ internal sealed class Engine
             File.WriteAllLines(temp, lines, Encoding.UTF8);
             if (File.Exists(statePath)) File.Replace(temp, statePath, null); else File.Move(temp, statePath);
             StateDirty = false;
+            loadedStamp = Data.UserStamp();
         }
         finally { if (File.Exists(temp)) File.Delete(temp); }
     }

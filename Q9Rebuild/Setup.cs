@@ -35,8 +35,11 @@ internal static class Registration
     private static readonly Guid ProfilesClass = new Guid("33c53a50-f456-4884-b049-85fd643ecfed");
     private static readonly Guid CategoriesClass = new Guid("a4b544a1-438d-4b41-9325-869523e2d6c7");
     private static readonly Guid[] Categories = {
-        new Guid("34745c63-b2f0-4784-8b67-5e12c8701a31"),
-        new Guid("25504fb4-7bab-4bc1-9c69-cf81890f0ef5")
+        new Guid("34745c63-b2f0-4784-8b67-5e12c8701a31"),   // GUID_TFCAT_TIP_KEYBOARD
+        new Guid("25504fb4-7bab-4bc1-9c69-cf81890f0ef5"),   // GUID_TFCAT_TIPCAP_SYSTRAYSUPPORT
+        // Console windows do not initialize COM; TSF loads only COM-less capable TIPs there
+        // (the original q9w10b5tsf64.dll registers this as well).
+        new Guid("364215d9-75bc-11d7-a6ef-00065b84435c")    // GUID_TFCAT_TIPCAP_COMLESS
     };
     internal static readonly string Tip = "0404:{" + TsfIdentity.ClassId + "}{" + TsfIdentity.ProfileId + "}";
     private const string ComKey = @"SOFTWARE\Classes\CLSID\{" + TsfIdentity.ClassId + "}";

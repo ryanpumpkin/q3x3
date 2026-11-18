@@ -982,8 +982,14 @@ internal sealed class Q9Panel : Form
             heldKeys.Clear();
             shiftAlone = false;
             Hide();
+            // The normal and administrator hosts share the same files: save before the other takes over.
+            SaveIfDirty();
+            return;
         }
-        else if (!paused && !Visible) Show();
+        try { engine.SyncFromDisk(); }
+        catch (IOException) { }
+        catch (UnauthorizedAccessException) { }
+        if (!paused && !Visible) Show();
     }
 
     internal void ReportTsfDeliveryFailure()

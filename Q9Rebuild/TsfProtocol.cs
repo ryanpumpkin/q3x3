@@ -7,7 +7,10 @@ internal enum TsfMessage { Focus = 1, Blur, TestDown, TestUp, Down, Up, Commit, 
 internal static class TsfProtocol
 {
     internal const int CopyData = 0x004A;
-    internal const string HostName = "Q9Rebuild.TSF.85e6bb8f";
+    // An elevated application cannot receive messages from a normal host (UIPI), so elevated
+    // processes use their own elevated host under a separate name.
+    internal static readonly bool Elevated = IsElevated(System.Diagnostics.Process.GetCurrentProcess().Handle);
+    internal static readonly string HostName = "Q9Rebuild.TSF.85e6bb8f" + (Elevated ? ".admin" : "");
     internal static readonly IntPtr MessageOnly = new IntPtr(-3);
 
     [StructLayout(LayoutKind.Sequential)]
@@ -69,7 +72,45 @@ internal static class TsfProtocol
         return "thread=" + thread + " fgThread=" + foregroundThread + " fgProcess=" + foregroundProcess;
     }
 
-    internal static IntPtr FindHost() { return FindWindowEx(MessageOnly, IntPtr.Zero, null, HostName); }
+    internal static IntPtr FindHost()
+    {
+        IntPtr host = FindWindowEx(MessageOnly, IntPtr.Zero, null, HostName);
+        // Inside an elevated application, accept only an elevated host: a normal process could
+        // otherwise register this window name and receive the keys typed in administrator windows.
+        if (host != IntPtr.Zero && Elevated && !WindowIsElevated(host)) return IntPtr.Zero;
+        return host;
+    }
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern IntPtr OpenProcess(uint access, bool inherit, uint processId);
+    [DllImport("kernel32.dll")]
+    private static extern bool CloseHandle(IntPtr handle);
+    [DllImport("advapi32.dll", SetLastError = true)]
+    private static extern bool OpenProcessToken(IntPtr process, uint access, out IntPtr token);
+    [DllImport("advapi32.dll", SetLastError = true)]
+    private static extern bool GetTokenInformation(IntPtr token, int infoClass, out int value, int length, out int returned);
+
+    private static bool WindowIsElevated(IntPtr window)
+    {
+        uint process;
+        if (GetWindowThreadProcessId(window, out process) == 0) return false;
+        IntPtr handle = OpenProcess(0x1000, false, process);   // PROCESS_QUERY_LIMITED_INFORMATION
+        if (handle == IntPtr.Zero) return false;
+        try { return IsElevated(handle); }
+        finally { CloseHandle(handle); }
+    }
+
+    private static bool IsElevated(IntPtr process)
+    {
+        IntPtr token;
+        if (!OpenProcessToken(process, 0x0008, out token)) return false;   // TOKEN_QUERY
+        try
+        {
+            int elevated, returned;
+            return GetTokenInformation(token, 20, out elevated, 4, out returned) && elevated != 0;   // TokenElevation
+        }
+        finally { CloseHandle(token); }
+    }
     internal static IntPtr Foreground { get { return GetForegroundWindow(); } }
 
     internal static bool IsForeground(IntPtr window)
@@ -78,8 +119,47 @@ internal static class TsfProtocol
         // from the window that owns foreground.
         uint process, foreground;
         if (GetWindowThreadProcessId(window, out process) == 0 || process == 0) return false;
-        GetWindowThreadProcessId(GetForegroundWindow(), out foreground);
-        return process == foreground;
+        IntPtr foregroundWindow = GetForegroundWindow();
+        GetWindowThreadProcessId(foregroundWindow, out foreground);
+        if (process == foreground) return true;
+        // To other processes a console window reports the program attached to it (e.g.
+        // powershell.exe), not the conhost.exe that owns it and runs TSF. Those two are always
+        // parent and child, in one direction or the other.
+        return foreground != 0 && IsConsoleWindow(foregroundWindow) &&
+            (ParentOf(process) == foreground || ParentOf(foreground) == process);
+    }
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    private static extern int GetClassName(IntPtr window, System.Text.StringBuilder name, int length);
+
+    private static bool IsConsoleWindow(IntPtr window)
+    {
+        var name = new System.Text.StringBuilder(32);
+        return GetClassName(window, name, name.Capacity) > 0 && name.ToString() == "ConsoleWindowClass";
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct BasicInformation
+    {
+        public IntPtr ExitStatus, PebBaseAddress, AffinityMask, BasePriority, UniqueProcessId, ParentProcessId;
+    }
+
+    [DllImport("ntdll.dll")]
+    private static extern int NtQueryInformationProcess(IntPtr process, int infoClass, ref BasicInformation info,
+        int length, out int returned);
+
+    private static uint ParentOf(uint processId)
+    {
+        IntPtr handle = OpenProcess(0x1000, false, processId);   // PROCESS_QUERY_LIMITED_INFORMATION
+        if (handle == IntPtr.Zero) return 0;
+        try
+        {
+            var info = new BasicInformation();
+            int returned;
+            return NtQueryInformationProcess(handle, 0, ref info, Marshal.SizeOf(info), out returned) == 0
+                ? (uint)info.ParentProcessId.ToInt64() : 0;
+        }
+        finally { CloseHandle(handle); }
     }
 
     internal static bool Send(IntPtr target, IntPtr sender, TsfMessage command, string payload)

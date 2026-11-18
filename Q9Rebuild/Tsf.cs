@@ -252,10 +252,10 @@ public sealed class TsfInput : ITfTextInputProcessor, ITfKeyEventSink, ITfThread
         nextLaunch = DateTime.UtcNow.AddSeconds(3);
         try
         {
+            // Never from SYSTEM (e.g. the sign-in screen). From an elevated application the child
+            // host inherits elevation and registers the separate administrator host name.
             using (var identity = WindowsIdentity.GetCurrent())
-            {
-                if (identity.IsSystem || new WindowsPrincipal(identity).IsInRole(WindowsBuiltInRole.Administrator)) return;
-            }
+                if (identity.IsSystem) return;
             string path = Path.Combine(Path.GetDirectoryName(typeof(TsfInput).Assembly.Location), "Q9Rebuild.exe");
             if (File.Exists(path))
                 using (Process.Start(new ProcessStartInfo(path, "/tsf") { UseShellExecute = false })) { }
