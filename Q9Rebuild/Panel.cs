@@ -378,7 +378,7 @@ internal sealed class Q9Panel : Form
     // FUN_1800b7eb0：拼音有聲母、揀咗單韻母之後，冇複韻母嘅格用灰色 (0xC0C0C1) 填
     private bool PinyinDisabled(int key)
     {
-        if (engine.Mode != Engine.Pinyin || engine.State != St.Compose || engine.Buf.Length != 2 || engine.Buf[1] == '0') return false;
+        if (engine.Mode != Engine.Pinyin || engine.NoChar || engine.State != St.Compose || engine.Buf.Length != 2 || engine.Buf[1] == '0') return false;
         switch (engine.Buf[1])
         {
             // 原版逐格呼叫 FUN_1800b0700：o → 4 5 6；e → 1 2 3 5 6；a → 1 2 5 6 (4 = er / ao 唔會灰)
@@ -435,6 +435,7 @@ internal sealed class Q9Panel : Form
                 minus = "button10_shapeExtra.png"; plus = "button11_pyExtra.png";
                 lines = new[] { "沒有中文字供選用", "請輸入其他字", "其他版本可有多字" };
             }
+            else if (mode == Engine.Pinyin) lines = new[] { "沒有中文字供選用", "請輸入其他字", "其他版本可有多字" };   // 原版截圖 P24420
             return;
         }
         if (engine.Kind == "emojicat") { key0 = "標點"; return; }
@@ -631,7 +632,7 @@ internal sealed class Q9Panel : Form
                 RectangleF grid = new RectangleF(input.X, input.Y, input.Width, input.Width * 688f / 682f);
                 Draw(g, image, grid);
             }
-            if (select && !choosingMethod && !engine.LookupSym)
+            if (select && !choosingMethod && !engine.LookupSym && !engine.SymbolCode)
             {
                 // FUN_1800b0580 / FUN_1800b55c0：每格四角三角形，格邊內縮 GridLine*，邊長 CornerSize，
                 // 用 GDI Polygon (NULL_PEN) 填 0xC0C0C1

@@ -105,6 +105,17 @@ internal static class Dbcs
         if (lang == 0)
         {
             string s;
+            // 原版 0x8840 以上一律查 MAPBU；私用區 (原版靠 HKSCS 字型) 先用 HKSCS 表攞真正 Unicode
+            if (MapBu != null && b0 >= 0x88 && (b1 >= 0x40 && b1 <= 0x7E || b1 >= 0xA1 && b1 <= 0xFE))
+            {
+                int col = b1 < 0x7F ? b1 - 0x40 : b1 - 0xA1 + 63;
+                int i = ((b0 - 0x88) * 158 + col) * 2;
+                if (i + 1 < MapBu.Length)
+                {
+                    int v = MapBu[i] << 8 | MapBu[i + 1];
+                    if (v != 0 && (v < 0xE000 || v > 0xF8FF)) return ((char)v).ToString();
+                }
+            }
             if (Hkscs.TryGetValue(b0 << 8 | b1, out s)) return s;
             s = Big5.GetString(new[] { b0, b1 });
             return s.Length == 1 && s[0] != '?' && (s[0] < 0xE000 || s[0] > 0xF8FF) ? s : "";
@@ -688,17 +699,20 @@ internal sealed class Engine
     internal string Last = "";                // 上一個上屏嘅字
     internal string Note = "";
     internal bool NoChar;                     // 「未有字」畫面
-    internal bool LookupSym;
+    internal bool LookupSym;                  // 由檢字選單入嘅符號頁 (原版冇四角三角形、兩邊掣同檢字選單一樣)
     // 原版 FUN_1800ad920 睇「上一個候選字清單」停喺第幾頁：第一頁先顯示字形檢字掣／字形 0 嘅「檢字」標點頁
     private int codePageOff;
     internal bool CodePageFirst { get { return codePageOff == 0; } }
-    internal bool PunctCheck;                 // 字形冇關聯字時按 0 嘅標點頁 (0 = 檢字、兩行提示)                  // 由檢字選單入嘅符號頁 (原版冇四角三角形、兩邊掣同檢字選單一樣)
+    internal bool PunctCheck;                 // 字形冇關聯字時按 0 嘅標點頁 (0 = 檢字、兩行提示)
+    // 拼音四角符號 (碼 0x00) 清單：原版冇選字三角形 (原版截圖 P13)
+    internal bool SymbolCode { get { return Kind == "code" && Mode == Pinyin && Buf.Length > 0 && Buf[0] == '0'; } }
 
     // 資料視窗：上一個字嘅資料 (格式同原版 "筆劃﹕%s" 等)
     internal string[] InfoLines()
     {
         if (Last.Length == 0) return null;
         string[] f = Data.Info(Lang, Last);
+        if (f == null) return null;   // 冇字資料 (符號等)：原版資料區乜都唔顯示 (原版截圖 P298)
         byte[] code = Dbcs.Encode(Lang, Last);
         Func<int, string> field = i => f != null && f.Length > i ? f[i] : "*";
         Func<int, string> first = i => field(i).Split(',')[0];
@@ -966,6 +980,8 @@ internal sealed class Engine
         var defaults = Elements(DefaultRel[Lang]);
         if (ch.Length == 0)
             return defaults.Skip(6).Concat(defaults.Skip(3).Take(3)).Concat(defaults.Take(3)).ToList();
+        // 上咗符號 (唔係文字)：原版顯示預設字，唔對調上下行 (原版截圖 P298)
+        if (!char.IsLetter(ch, 0)) return defaults;
         var counts = Data.DynamicRelated(Lang, ch).Select(p => new KeyValuePair<string, int>(p.Key, p.Value)).ToList();
         Dictionary<string, int> learned;
         if (learnedRel.TryGetValue(Lang + ":" + ch, out learned))
