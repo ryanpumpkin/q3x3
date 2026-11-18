@@ -2,6 +2,7 @@
     # 將本機原版九方檔案（DLL、皮膚、自定範本、說明書）編譯入 exe，之後唔使再裝原版。
     # 整出嚟嘅 exe 包含原版版權資料，只供自己用，唔好公開發佈。
     [switch]$Embed,
+    [switch]$Setup,
     [string]$Install = 'C:\Program Files\Q9W10B5'
 )
 
@@ -9,14 +10,16 @@ $ErrorActionPreference = 'Stop'
 $compiler = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
 $out = Join-Path $PSScriptRoot 'Q9Rebuild.exe'
 $cscArgs = @(
-    '/nologo', '/target:winexe', '/platform:x64', '/optimize+',
+    '/nologo', '/target:winexe', '/platform:x64', '/optimize+', '/define:Q9_TSF',
     '/reference:System.Windows.Forms.dll', '/reference:System.Drawing.dll', '/reference:System.Core.dll',
     '/reference:WPF\PresentationCore.dll', '/reference:WPF\WindowsBase.dll', '/reference:System.Xaml.dll',
     "/out:$out",
     # 公開嘅 Big5-HKSCS 對照表，內置咗就唔使同 exe 放埋一齊
     "/resource:$PSScriptRoot\big5hkscs.map,big5hkscs.map",
-    "$PSScriptRoot\Engine.cs", "$PSScriptRoot\Panel.cs"
+    "$PSScriptRoot\Engine.cs", "$PSScriptRoot\Panel.cs", "$PSScriptRoot\TsfProtocol.cs", "$PSScriptRoot\TsfHost.cs"
 )
+
+if ($Embed -and $Setup) { throw '-Setup requires a build that reads the installed original data.' }
 
 if ($Embed) {
     $root = (Resolve-Path -LiteralPath $Install).Path.TrimEnd('\')
@@ -53,3 +56,35 @@ try {
     if ($LASTEXITCODE -ne 0) { throw '編譯失敗' }
 }
 finally { Remove-Item -LiteralPath $rsp -ErrorAction SilentlyContinue }
+
+if ($Setup) {
+    $scratch = New-Item -ItemType Directory (Join-Path ([IO.Path]::GetTempPath()) ('q9-setup-' + [guid]::NewGuid()))
+    $tsf = Join-Path $scratch.FullName 'Q9Tsf.dll'
+    $reg32 = Join-Path $scratch.FullName 'Q9Register32.exe'
+    try {
+        $tsfArgs = @(
+            '/nologo', '/target:library', '/platform:anycpu', '/optimize+', '/reference:System.Windows.Forms.dll', "/out:$tsf",
+            "$PSScriptRoot\Tsf.cs", "$PSScriptRoot\TsfProtocol.cs", "$PSScriptRoot\TsfIdentity.cs"
+        )
+        & $compiler @tsfArgs
+        if ($LASTEXITCODE -ne 0) { throw 'Q9Tsf.dll compilation failed.' }
+        $helperArgs = @(
+            '/nologo', '/target:exe', '/platform:x86', '/optimize+', '/define:Q9_REGISTER32', "/out:$reg32",
+            "$PSScriptRoot\Setup.cs", "$PSScriptRoot\TsfIdentity.cs"
+        )
+        & $compiler @helperArgs
+        if ($LASTEXITCODE -ne 0) { throw 'Q9Register32.exe compilation failed.' }
+        $setupArgs = @(
+            '/nologo', '/target:winexe', '/platform:x64', '/optimize+', '/reference:System.Windows.Forms.dll',
+            "/win32manifest:$PSScriptRoot\Setup.manifest", "/out:$PSScriptRoot\Q9Setup.exe",
+            "/resource:$tsf,Q9Tsf.dll", "/resource:$reg32,Q9Register32.exe", "/resource:$out,Q9Rebuild.exe",
+            "$PSScriptRoot\Setup.cs", "$PSScriptRoot\TsfIdentity.cs"
+        )
+        & $compiler @setupArgs
+        if ($LASTEXITCODE -ne 0) { throw 'Q9Setup.exe compilation failed.' }
+    }
+    finally {
+        foreach ($file in $tsf, $reg32) { Remove-Item -LiteralPath $file -ErrorAction SilentlyContinue }
+        Remove-Item -LiteralPath $scratch.FullName -ErrorAction SilentlyContinue
+    }
+}

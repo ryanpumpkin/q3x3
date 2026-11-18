@@ -7,48 +7,76 @@ using System.IO;
 using System.Linq;
 using System.Text;
 
-internal static class Pe
+internal sealed class Pe
 {
+    private readonly byte[] image;
+    private readonly int sections, sectionTable, resourceRoot;
+
+    internal Pe(byte[] image)
+    {
+        this.image = image;
+        int pe = BitConverter.ToInt32(image, 0x3c);
+        sections = BitConverter.ToUInt16(image, pe + 6);
+        int opt = pe + 24;
+        sectionTable = opt + BitConverter.ToUInt16(image, pe + 20);
+        int dirs = opt + (BitConverter.ToUInt16(image, opt) == 0x20b ? 112 : 96);
+        resourceRoot = Offset(BitConverter.ToUInt32(image, dirs + 2 * 8));
+    }
+
+    internal int Offset(uint rva)
+    {
+        for (int i = 0; i < sections; i++)
+        {
+            int s = sectionTable + i * 40;
+            uint va = BitConverter.ToUInt32(image, s + 12), raw = BitConverter.ToUInt32(image, s + 20);
+            uint size = Math.Max(BitConverter.ToUInt32(image, s + 8), BitConverter.ToUInt32(image, s + 16));
+            if (rva >= va && rva < va + size) return (int)(rva - va + raw);
+        }
+        throw new InvalidDataException("RVA 不在任何區段。");
+    }
+
     // 讀取 PE 具名資源類型 (例如 "B5_STIMDATA")，每個類型取第一個葉節點。
-    internal static Dictionary<string, byte[]> NamedResources(byte[] img)
+    internal Dictionary<string, byte[]> NamedResources()
     {
         var result = new Dictionary<string, byte[]>(StringComparer.OrdinalIgnoreCase);
-        int pe = BitConverter.ToInt32(img, 0x3c);
-        int sections = BitConverter.ToUInt16(img, pe + 6);
-        int optSize = BitConverter.ToUInt16(img, pe + 20);
-        int opt = pe + 24;
-        int dirs = opt + (BitConverter.ToUInt16(img, opt) == 0x20b ? 112 : 96);
-        uint rsrcRva = BitConverter.ToUInt32(img, dirs + 2 * 8);
-        int secTable = opt + optSize;
-        Func<uint, int> map = rva =>
-        {
-            for (int i = 0; i < sections; i++)
-            {
-                int s = secTable + i * 40;
-                uint va = BitConverter.ToUInt32(img, s + 12), raw = BitConverter.ToUInt32(img, s + 20);
-                uint size = Math.Max(BitConverter.ToUInt32(img, s + 8), BitConverter.ToUInt32(img, s + 16));
-                if (rva >= va && rva < va + size) return (int)(rva - va + raw);
-            }
-            throw new InvalidDataException("RVA 不在任何區段。");
-        };
-        int root = map(rsrcRva);
-        int named = BitConverter.ToUInt16(img, root + 12);
+        int named = BitConverter.ToUInt16(image, resourceRoot + 12);
         for (int i = 0; i < named; i++)
         {
-            uint nameRef = BitConverter.ToUInt32(img, root + 16 + i * 8);
-            uint offset = BitConverter.ToUInt32(img, root + 20 + i * 8);
-            int np = root + (int)(nameRef & 0x7fffffff);
-            string name = Encoding.Unicode.GetString(img, np + 2, BitConverter.ToUInt16(img, np) * 2);
-            // 向下行到第一個資料項
-            while ((offset & 0x80000000) != 0)
-                offset = BitConverter.ToUInt32(img, root + (int)(offset & 0x7fffffff) + 20);
-            int entry = root + (int)offset;
-            int size = BitConverter.ToInt32(img, entry + 4);
-            var data = new byte[size];
-            Buffer.BlockCopy(img, map(BitConverter.ToUInt32(img, entry)), data, 0, size);
-            result[name] = data;
+            int p = resourceRoot + 16 + i * 8;
+            int np = resourceRoot + (int)(BitConverter.ToUInt32(image, p) & 0x7fffffff);
+            string name = Encoding.Unicode.GetString(image, np + 2, BitConverter.ToUInt16(image, np) * 2);
+            result[name] = ReadResource(BitConverter.ToUInt32(image, p + 4));
         }
         return result;
+    }
+
+    internal byte[] BitmapResource(uint id)
+    {
+        const uint bitmapType = 2;
+        uint type = FindResourceId(0, bitmapType);
+        return ReadResource(FindResourceId(type, id));
+    }
+
+    private uint FindResourceId(uint offset, uint id)
+    {
+        int dir = resourceRoot + (int)(offset & 0x7fffffff);
+        int named = BitConverter.ToUInt16(image, dir + 12), ids = BitConverter.ToUInt16(image, dir + 14);
+        for (int i = named; i < named + ids; i++)
+        {
+            int p = dir + 16 + i * 8;
+            if (BitConverter.ToUInt32(image, p) == id) return BitConverter.ToUInt32(image, p + 4);
+        }
+        throw new InvalidDataException("找不到資源 " + id + "。");
+    }
+
+    private byte[] ReadResource(uint offset)
+    {
+        while ((offset & 0x80000000) != 0)
+            offset = BitConverter.ToUInt32(image, resourceRoot + (int)(offset & 0x7fffffff) + 20);
+        int entry = resourceRoot + (int)offset;
+        var data = new byte[BitConverter.ToInt32(image, entry + 4)];
+        Buffer.BlockCopy(image, Offset(BitConverter.ToUInt32(image, entry)), data, 0, data.Length);
+        return data;
     }
 }
 
@@ -348,6 +376,9 @@ internal sealed class Q9Data
     private readonly Dictionary<string, byte[]> res;
     private readonly Dictionary<string, Tbl> tables = new Dictionary<string, Tbl>();
     private readonly Dictionary<string, RelTable> rels = new Dictionary<string, RelTable>();
+    internal const int RadicalBitmapWidth = 600, RadicalBitmapHeight = 60;
+    internal readonly byte[] RadicalBitmap;
+    private readonly Dictionary<string, int> radicalBitmapIndices = new Dictionary<string, int>();
     internal const string DllHash = "02755C6AC5DD4D4518734FD7FB7E069B67F4225147555997A1B79A5DA3C3DEE1";
 
     internal Q9Data(string install, string userDir)
@@ -360,11 +391,43 @@ internal sealed class Q9Data
         using (var sha = System.Security.Cryptography.SHA256.Create())
             if (BitConverter.ToString(sha.ComputeHash(image)).Replace("-", "") != DllHash)
                 throw new InvalidDataException("原裝 DLL 版本與已分析版本不符。");
-        res = Pe.NamedResources(image);
+        var pe = new Pe(image);
+        res = pe.NamedResources();
         byte[] mapBu;
         if (res.TryGetValue("MAPBU", out mapBu)) Dbcs.MapBu = mapBu;
+        // FUN_180004a80 / FUN_180004ad0：按 Big5 內碼查 37 個點陣字，圖樣喺 RT_BITMAP 130。
+        RadicalBitmap = ReadRadicalBitmap(pe.BitmapResource(130));
+        int radicalCodes = pe.Offset(0x32a0a0);
+        for (int i = 0; i < 37; i++)
+        {
+            int p = radicalCodes + i * 2;
+            string glyph = Dbcs.Decode(0, image[p + 1], image[p]);
+            if (glyph.Length > 0 && !radicalBitmapIndices.ContainsKey(glyph)) radicalBitmapIndices.Add(glyph, i);
+        }
         LoadCanton(image);
         LoadExtraGroups(image);
+    }
+
+    internal int RadicalBitmapIndex(string glyph)
+    {
+        int i;
+        return radicalBitmapIndices.TryGetValue(glyph, out i) ? i : -1;
+    }
+
+    private static byte[] ReadRadicalBitmap(byte[] resource)
+    {
+        const int pixelOffset = 40 + 2 * 4; // BITMAPINFOHEADER + 黑白色表
+        const int sourceStride = (RadicalBitmapWidth + 31) / 32 * 4;
+        const int destStride = (RadicalBitmapWidth + 15) / 16 * 2;
+        var bits = new byte[destStride * RadicalBitmapHeight];
+        // RT_BITMAP 由下向上，0 白 1 黑。CreateBitmap 嘅單色圖由上向下，0 黑 1 白。
+        for (int row = 0; row < RadicalBitmapHeight; row++)
+        {
+            int source = pixelOffset + (RadicalBitmapHeight - 1 - row) * sourceStride;
+            for (int col = 0; col < destStride; col++)
+                bits[row * destStride + col] = (byte)~resource[source + col];
+        }
+        return bits;
     }
 
     // ---------- 粵拼音節表 (.rdata，FUN_1800b9f00 / FUN_1800ba1e0) ----------
@@ -601,6 +664,12 @@ internal sealed class Q9Data
 
     internal string[] Info(int lang, string ch)
     {
+        string[] fields;
+        return InfoMap(lang).TryGetValue(ch, out fields) ? fields : null;
+    }
+
+    private Dictionary<string, string[]> InfoMap(int lang)
+    {
         if (info[lang] == null)
         {
             var map = new Dictionary<string, string[]>();
@@ -623,8 +692,50 @@ internal sealed class Q9Data
             }
             info[lang] = map;
         }
-        string[] fields;
-        return info[lang].TryGetValue(ch, out fields) ? fields : null;
+        return info[lang];
+    }
+
+    internal IEnumerable<string> FindPinyin(int lang, string query, bool cantonese)
+    {
+        string spelling = NormalizePinyin(query, cantonese);
+        if (spelling.Length == 0) yield break;
+        bool tone = char.IsDigit(spelling[spelling.Length - 1]);
+        int column = cantonese ? 6 : 3;
+        foreach (var entry in InfoMap(lang))
+        {
+            if (entry.Value.Length <= column) continue;
+            foreach (string reading in entry.Value[column].Split(',', '/', ';'))
+            {
+                string candidate = NormalizePinyin(reading, cantonese);
+                if (!tone && candidate.Length > 0 && char.IsDigit(candidate[candidate.Length - 1]))
+                    candidate = candidate.Substring(0, candidate.Length - 1);
+                if (candidate == spelling) { yield return entry.Key; break; }
+            }
+        }
+    }
+
+    private static string NormalizePinyin(string text, bool cantonese)
+    {
+        text = text.Trim().ToLowerInvariant().Replace("u:", "v");
+        int tone = 0;
+        if (text.Length > 0 && text[text.Length - 1] >= '1' && text[text.Length - 1] <= (cantonese ? '9' : '5'))
+        {
+            tone = text[text.Length - 1] - '0';
+            text = text.Substring(0, text.Length - 1);
+        }
+        var letters = new StringBuilder();
+        foreach (char ch in text.Normalize(NormalizationForm.FormD))
+        {
+            if (ch >= 'a' && ch <= 'z') letters.Append(ch);
+            else if (ch == '\u0308' && letters.Length > 0 && letters[letters.Length - 1] == 'u') letters[letters.Length - 1] = 'v';
+            else if (!cantonese && ch == '\u0304') tone = 1;
+            else if (!cantonese && ch == '\u0301') tone = 2;
+            else if (!cantonese && ch == '\u030c') tone = 3;
+            else if (!cantonese && ch == '\u0300') tone = 4;
+            else return "";
+        }
+        if (tone != 0 && letters.Length != 0) letters.Append(tone);
+        return letters.ToString();
     }
 
     internal List<string> UserLines(int lang, string name)
@@ -642,6 +753,31 @@ internal sealed class Q9Data
             list.Add(line.TrimStart('﻿'));
         }
         return list;
+    }
+
+    internal bool AddUserPhrase(int lang, string phrase)
+    {
+        if (phrase == null) return false;
+        phrase = phrase.Trim();
+        int length = Engine.Elements(phrase).Count;
+        if (length < 2 || length > 20 || phrase.Any(char.IsControl))
+            return false;
+        string path = UserFile(lang, "Q9PHRASE.TXT", true);
+        if (UserLines(lang, "Q9PHRASE.TXT").Contains(phrase)) return false;
+
+        // 舊檔可能係 Big5／GB、UTF-8 或 UTF-16，保留原文同註解。
+        string existing;
+        try { existing = File.ReadAllText(path, new UTF8Encoding(false, true)); }
+        catch (DecoderFallbackException) { existing = File.ReadAllText(path, Encoding.GetEncoding(lang == 0 ? 950 : 936)); }
+        string separator = existing.Length > 0 && !existing.EndsWith("\n", StringComparison.Ordinal) ? Environment.NewLine : "";
+        string temp = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
+        try
+        {
+            File.WriteAllText(temp, existing + separator + phrase + Environment.NewLine, Encoding.Unicode);
+            File.Replace(temp, path, null);
+            return true;
+        }
+        finally { if (File.Exists(temp)) File.Delete(temp); }
     }
 
     private readonly List<string>[] builtInPhrases = new List<string>[2];
@@ -713,10 +849,15 @@ internal sealed class Engine
     // 資料視窗：上一個字嘅資料 (格式同原版 "筆劃﹕%s" 等)
     internal string[] InfoLines()
     {
-        if (Last.Length == 0) return null;
-        string[] f = Data.Info(Lang, Last);
+        return InfoLines(Last);
+    }
+
+    internal string[] InfoLines(string character)
+    {
+        if (character.Length == 0) return null;
+        string[] f = Data.Info(Lang, character);
         if (f == null) return new string[0];   // 冇字資料 (符號等)：原版資料區乜都唔顯示 (原版截圖 P298)
-        byte[] code = Dbcs.Encode(Lang, Last);
+        byte[] code = Dbcs.Encode(Lang, character);
         Func<int, string> field = i => f != null && f.Length > i ? f[i] : "*";
         Func<int, string> first = i => field(i).Split(',')[0];
         string hex = code == null ? "*" : string.Format("{0:X2}{1:X2}", code[0], code[1]);
@@ -730,10 +871,14 @@ internal sealed class Engine
     }
     internal Action<string> Output;
     internal Action Beep = delegate { };
+    internal Action PhraseRequested;
+    internal Action PinyinLookupRequested;
 
     private List<string> full = new List<string>();
     private int previousLookupMode;
     private int phraseSuffixLength = 1;
+    private string phrasePrefix = "";
+    private bool phrasePrefixCommitted;
     private int off;
     private bool visual;                      // 清單以畫面次序 (上排先) 儲存
     // 重建版自己學返嘅關聯字次數 (唔寫入原版檔案)："語言:前字" → 後字 → 加咗幾多次
@@ -1189,7 +1334,12 @@ internal sealed class Engine
             PunctCheck = k == '0' && !hasRel && Mode == Glyph && codePageOff == 0;
             return true;
         }
-        if (k == '+') { phraseSuffixLength = 1; OpenPhrases(); return true; }
+        if (k == '+')
+        {
+            StartPhrases(Last, true);
+            if (PhraseRequested != null) PhraseRequested();
+            return true;
+        }
         if (k == '-') { OpenTexts("fav", Data.UserLines(Lang, "yourAlwaysUse.txt"), "未有自定常用字句"); return true; }
         return false;
     }
@@ -1418,6 +1568,7 @@ internal sealed class Engine
 
     private bool SelectKey(char k)
     {
+        if (Kind == "phrase" && k == '+') { CyclePhraseLength(); return true; }
         if (Kind == "lookup-menu" && k >= '1' && k <= '9') return ChooseLookup(k - '0');
         if (Kind == "stroke-count" && k >= '1' && k <= '9') return OpenLookupRow("STDATA", off + k - '0');
         if (Kind == "radical-stroke" && k >= '1' && k <= '9') return OpenRadicals(k - '0');
@@ -1535,6 +1686,8 @@ internal sealed class Engine
         OpenTexts("lookup-menu", labels.ToList(), "未有檢字方法");
     }
 
+    internal void ShowLookupMethods() { OpenLookupMenu(); }
+
     private bool ChooseLookup(int key)
     {
         if (key == 1)
@@ -1542,8 +1695,11 @@ internal sealed class Engine
             var strokes = Enumerable.Range(1, 26).Select(n => n.ToString()).Concat(new[] { ">27" }).ToList();
             OpenTexts("stroke-count", strokes, "未有筆劃數目");
         }
-        // 「音」：原版喺檢字選單揀咗只係返去靜止頁，唔轉拼音 (原版截圖 G1..92、G1..928)
-        else if (key == 2) Reset();
+        else if (key == 2)
+        {
+            Reset();
+            if (PinyinLookupRequested != null) PinyinLookupRequested();
+        }
         else if (key == 3)
         {
             // 九方部首筆劃檢字：先揀部首第一筆 (畫面同字形靜止一樣，FUN_1800b0970)
@@ -1557,6 +1713,16 @@ internal sealed class Engine
     // RADDATA 第 1-9 行：該筆開頭嘅部首「偽碼」(A4A1 起)，索引 = (首位元組 - 0xA4) * 0x5E + 次位元組 - 0xA1；
     // 部首字本身係 FUN_1800b0970 入面嘅常數陣列；揀咗第 i 個部首 = RADDATA 第 10 + i 行
     internal const string RadicalGlyphs = "扌支寸十土士耒赤走甘皮老斗木艹麥黃鼓青革韋車弋犭戈女尢廾力又大爻屮山己凵匚冂冖几网臣長禸肉用彐月殳鬥鬯黽風馬髟門文方宀广心丶亠冫衤礻羊疒穴立火玄鹿麻音首高言辛齊龍阝子巛卩厶阝乙刀癶匕疋矛糸辶爿幺廴弓羽飛田皿目日曰毋口囗邑尸骨黑鼎貝足里臼艮見鼠厂工二一牙玉瓦歹干旡至而耳非石雨豕辰酉覀豆鬲面頁韭巾亅卜丨丿小米止比水虍虫黹聿隶鹵齒戶谷八父人儿入金食彡彳攵夂夊夕勹片牛瓜氏气爪斤欠毛自舌舛禾竹缶生白矢身釆阜隹行角豸舟色血黍鼻龜龠鬼魚鳥香";
+    private const string GbRadicalGlyphs =
+        "廾扌支寸屮巾十土士耒赤走甘皮老斗木艹麥黃鼓靑革韋車" +
+        "弋犭戈女尢廾力又大爻" +
+        "屮山己凵匚匸冂冖几网臣長禸肉用彐月殳鬥鬯黽風馬髟門" +
+        "户文方宀广心丶亠言冫衤礻羊疒穴立火礻玄鹿麻音首高良言辛齊龍" +
+        "阝子巛卩厶阝乙刀癶匕疋矛糸辶比爿幺廴弓羽飛" +
+        "田皿目日曰毋口囗尸骨黑鼎貝足里臼艮見鼠" +
+        "厂工二一牙玉瓦歹干无至而耳疋石雨豕辰酉覀豆鬲面頁" +
+        "巾亅卜丨丿小米止比水虍虫黹聿隶非鹵齒韭" +
+        "舍谷八父人儿入金食彡彳攵夂夊夕丿儿勹片牛瓜氏气爪斤欠毛自舌舛禾竹缶生白矢身釆隹行角豸舟色血黍鼻龜龠鬼魚鳥香";
     private List<int> radicalIndex = new List<int>();
 
     internal int RadicalIndexAt(int key)
@@ -1567,15 +1733,16 @@ internal sealed class Engine
 
     private bool OpenRadicals(int stroke)
     {
+        string glyphs = Lang == 0 ? RadicalGlyphs : GbRadicalGlyphs;
         var bytes = Data.Table(Lang, "RADDATA").RawRow(stroke);
         radicalIndex = new List<int>();
         for (int p = 0; p + 1 < bytes.Length; p += 2)
         {
             int idx = (bytes[p] - 0xA4) * 0x5E + bytes[p + 1] - 0xA1;
-            if (idx >= 0 && idx < RadicalGlyphs.Length) radicalIndex.Add(idx);
+            if (idx >= 0 && idx < glyphs.Length) radicalIndex.Add(idx);
         }
         if (radicalIndex.Count == 0) { Beep(); return true; }
-        var shown = radicalIndex.Select(i => RadicalGlyphs[i].ToString()).ToList();
+        var shown = radicalIndex.Select(i => glyphs[i].ToString()).ToList();
         var keep = radicalIndex;
         SetList("radical-count", shown, false);
         radicalIndex = keep;
@@ -1620,15 +1787,23 @@ internal sealed class Engine
         return true;
     }
 
-    private void OpenPhrases()
+    internal void StartPhrases(string prefix, bool prefixCommitted)
+    {
+        phrasePrefix = prefix;
+        phrasePrefixCommitted = prefixCommitted;
+        phraseSuffixLength = 1;
+        OpenPhrases();
+    }
+
+    internal void OpenPhrases()
     {
         // FUN_18000dd40 / FUN_18000eaa0：自定詞語先行，詞長 4 代表四字或以上。
         var list = Data.UserLines(Lang, "Q9PHRASE.TXT").Concat(Data.Phrases(Lang))
             .Where(phrase =>
             {
-                if (Last.Length == 0) return true;
-                if (!phrase.StartsWith(Last, StringComparison.Ordinal)) return false;
-                int length = Elements(phrase.Substring(Last.Length)).Count;
+                if (phrasePrefix.Length == 0) return true;
+                if (!phrase.StartsWith(phrasePrefix, StringComparison.Ordinal)) return false;
+                int length = Elements(phrase.Substring(phrasePrefix.Length)).Count;
                 return Math.Min(4, length) == phraseSuffixLength;
             })
             .ToList();
@@ -1641,6 +1816,14 @@ internal sealed class Engine
     {
         phraseSuffixLength = phraseSuffixLength % 4 + 1;
         OpenPhrases();
+    }
+
+    internal int PhraseLength { get { return phrasePrefix.Length == 0 ? 0 : phraseSuffixLength + Elements(phrasePrefix).Count; } }
+
+    internal void PickLookupCharacter(string character)
+    {
+        SetList("lookup-result", new List<string> { character }, false);
+        Commit(character);
     }
 
     private void OpenTexts(string kind, List<string> list, string empty)
@@ -1662,7 +1845,8 @@ internal sealed class Engine
     internal void Commit(string s)
     {
         string text = s;
-        if (Kind == "phrase" && Last.Length > 0 && s.StartsWith(Last)) text = s.Substring(Last.Length);  // 首字已經上屏
+        if (Kind == "phrase" && phrasePrefixCommitted && s.StartsWith(phrasePrefix, StringComparison.Ordinal))
+            text = s.Substring(phrasePrefix.Length);  // 詞首已經上屏
         bool single = Elements(s).Count == 1 && (Kind == "code" || Kind == "rel" || Kind == "lookup-result");
         if (HalfPunct && (Kind == "punct" || Kind == "sym"))
         {

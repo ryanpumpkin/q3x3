@@ -133,6 +133,13 @@ internal sealed class Q9Panel : Form
         engine.UpdateOrder = settings["UpdateOrder"] != 0;
         engine.Output = Deliver;
         engine.Beep = delegate { if (!Capture_) Native.MessageBeep(0); };
+        engine.PhraseRequested = QueueClipboardPhrase;
+        engine.PinyinLookupRequested = delegate
+        {
+            if (Capture_ || !IsHandleCreated) return;
+            IntPtr target = Native.GetForegroundWindow();
+            BeginInvoke(new Action(() => OpenPinyinLookup("", false, target)));
+        };
         engine.ResetQuiet();
         ApplySize();
         hookProc = HookCallback;
@@ -154,6 +161,11 @@ internal sealed class Q9Panel : Form
     internal void StartHook()
     {
         hook = Native.SetWindowsHookEx(13, hookProc, Native.GetModuleHandle(null), 0);
+        StartSaving();
+    }
+
+    internal void StartSaving()
+    {
         // 每 30 秒將學到嘅關聯字同最近用字寫入 state.txt，程式死咗最多只會冇咗半分鐘
         saveTimer.Tick += delegate { SaveIfDirty(); };
         saveTimer.Start();
@@ -588,6 +600,7 @@ internal sealed class Q9Panel : Form
         }
         using (Graphics fg = Graphics.FromImage(frame.Bitmap)) PaintFrame(fg, frame.Dc);
         e.Graphics.DrawImageUnscaled(frame.Bitmap, 0, 0);
+        if (!Capture_) UpdatePhraseWindow();
     }
 
     private void PaintFrame(Graphics g, IntPtr textDc)
@@ -699,7 +712,10 @@ internal sealed class Q9Panel : Form
                     else if (allHalf && t.Length == 3) { size = big; x = (int)r.X + (CellPx - 3 * big / 2) / 2 + 2; }
                     // 部首第 0x51 個 (阝 右耳) 原版向右移半個字 (FUN_1800b0970)
                     if (engine.RadicalIndexAt(key) == 0x51) x += size / 2;
-                    Gdi.Text(hdc, t, emojiList ? "Segoe UI Emoji" : face, size, color, x, (int)r.Y + (int)(adjV * s));
+                    int baseline = (int)r.Y + (int)(adjV * s);
+                    int bitmap = engine.Lang == 0 && engine.Kind == "radical-count" ? data.RadicalBitmapIndex(t) : -1;
+                    if (bitmap >= 0) Gdi.Radical(hdc, data.RadicalBitmap, bitmap, x, baseline, size);
+                    else Gdi.Text(hdc, t, emojiList ? "Segoe UI Emoji" : face, size, color, x, baseline);
                 }
             }
             else if ((engine.Kind == "rel" || engine.Kind == "code" || engine.Kind == "pyhint" || engine.Kind == "sound-extra") && !engine.NoChar)   // 「未有字」唔畫預覽
@@ -758,7 +774,7 @@ internal sealed class Q9Panel : Form
             RectangleF m = Px(skin.Area("MESSAGE_AREA"));
             if (paused) lines = new[] { "已暫停（按 Shift 恢復）" };
             else if (engine.Note.Length > 0) lines = new[] { engine.Note };
-            else if (engine.Mode == Engine.Canton && engine.State == St.Compose && !engine.NoChar) { DrawCanton(g, hdc, face, m); lines = null; }   // 「未有字」唔畫拼法清單
+            else if (engine.Mode == Engine.Canton && engine.State == St.Compose && !engine.NoChar) { DrawCanton(hdc, face, m); lines = null; }   // 「未有字」唔畫拼法清單
             if (lines != null)
                 for (int i = 0; i < lines.Length; i++)
                     Gdi.Text(hdc, lines[i], face, Pt(31) + 1, Color.White, (int)(m.X + 9 * s) + 1, (int)(m.Y + (64 + i * 57.5f) * s) + 1);
@@ -766,27 +782,31 @@ internal sealed class Q9Panel : Form
         }
     }
 
-    // 粵拼拼法清單：每頁三行，揀中嗰行淺色底黑字，右下角「+」提示可以轉 (原版畫面)
-    private void DrawCanton(Graphics g, IntPtr hdc, string face, RectangleF m)
+    // FUN_18000c250：三行視窗跟住選中嘅拼法，只有仲有其他拼法先畫「－」／「＋」。
+    private void DrawCanton(IntPtr hdc, string face, RectangleF m)
     {
         float s = S;
         var spell = data.CantonSpellings(engine.CantonKeys);
-        int choice = engine.CantonChoice, first = (choice - 1) / 3 * 3;
+        int choice = engine.CantonChoice, first = Math.Max(0, choice - 2);
+        int topBaseline = (int)(m.Y + 64 * s) + 1;
         for (int row = 0; row < 3 && first + row < spell.Count; row++)
         {
             bool chosen = first + row + 1 == choice;
-            int x = (int)(m.X + 20 * s) + 2, baseline = (int)(m.Y + 64 * s) + 1 + (int)Math.Round(row * 58f * s);
+            int x = (int)(m.X + 20 * s) + 2, baseline = topBaseline + (int)Math.Round(row * 58f * s);
             if (chosen)
             {
                 Gdi.Fill(hdc, Color.FromArgb(220, 231, 234), (int)(m.X + 17.8f * s), (int)(m.Y + 17.8f * s) + (int)Math.Round(row * 58f * s), (int)(299 * s), (int)(58 * s));
             }
             Gdi.Text(hdc, spell[first + row], face, Pt(31) + 1, chosen ? Color.Black : Color.White, x, baseline);
         }
-        // 「+」原版有 ClearType 彩邊，字型未搞清楚；呢個位置最接近 (原版截圖)
-        Gdi.Text(hdc, "+", face, Pt(44), Color.FromArgb(140, 140, 140), (int)(m.X + 398 * s) + 1, (int)(m.Y + 184 * s) - 2);
+        int hintX = (int)(CellPx * 2.5) + 20;
+        if (choice > 1) Gdi.Text(hdc, "－", face, 14, Color.White, hintX, topBaseline);
+        if (choice < spell.Count) Gdi.Text(hdc, "＋", face, 14, Color.White, hintX, topBaseline + (int)Math.Round(116 * s));
     }
 
     // ---------- 輸出 ----------
+    internal Action<string> TextSink;
+
     private void Deliver(string text)
     {
         Sent.Add(text);
@@ -797,6 +817,7 @@ internal sealed class Q9Panel : Form
             File.AppendAllText(Path.Combine(dir, DateTime.Now.ToString("yyyy-MM-dd") + ".txt"), text, Encoding.UTF8);
         }
         if (Capture_) return;
+        if (TextSink != null) { TextSink(text); return; }
         if (IsHandleCreated) BeginInvoke(new Action(() => Native.Type(text))); else Native.Type(text);
     }
 
@@ -903,41 +924,73 @@ internal sealed class Q9Panel : Form
         {
             int vk = Marshal.ReadInt32(lParam), flags = Marshal.ReadInt32(lParam, 8);
             int message = wParam.ToInt32();
-            bool down = message == 0x100 || message == 0x104;
-            bool shift = vk == 0x10 || vk == 0xA0 || vk == 0xA1;
             if ((flags & 0x10) == 0 || AcceptInjected && vk != 0xE7)       // 忽略注入嘅按鍵 (包括自己送出嘅字)
-            {
-                if (shift)
-                {
-                    if (down) { if (!shiftAlone) { shiftAlone = true; shiftDown = DateTime.UtcNow; } }
-                    else
-                    {
-                        if (shiftAlone && settings["ShiftToggle"] != 0 && (DateTime.UtcNow - shiftDown).TotalMilliseconds < 350)
-                            BeginInvoke(new Action(TogglePause));
-                        shiftAlone = false;
-                    }
-                }
-                else
-                {
-                    shiftAlone = false;
-                    if (!down)
-                    {
-                        if (heldKeys.Remove(vk)) return (IntPtr)1;     // 食埋已攔截按鍵嘅放開事件
-                    }
-                    else
-                    {
-                        bool modifier = Native.Down(0x11) || Native.Down(0x12) || Native.Down(0x5B) || Native.Down(0x5C);
-                        bool shifted = Native.Down(0x10);
-                        if (!paused && !modifier && !(shifted && settings["KeyMode"] >= 2))
-                        {
-                            char key = MapKey(vk, flags);
-                            if (key != '\0' && HandleKey(key)) { heldKeys.Add(vk); return (IntPtr)1; }
-                        }
-                    }
-                }
-            }
+                if (ProcessVirtualKey(vk, flags, message == 0x100 || message == 0x104)) return (IntPtr)1;
         }
         return Native.CallNextHookEx(hook, code, wParam, lParam);
+    }
+
+    private static bool IsShift(int vk) { return vk == 0x10 || vk == 0xA0 || vk == 0xA1; }
+
+    private char AvailableKey(int vk, int flags)
+    {
+        if (pinyinLookup != null && pinyinLookup.ContainsFocus) return '\0';
+        bool modifier = Native.Down(0x11) || Native.Down(0x12) || Native.Down(0x5B) || Native.Down(0x5C);
+        return paused || modifier || Native.Down(0x10) && settings["KeyMode"] >= 2 ? '\0' : MapKey(vk, flags);
+    }
+
+    internal bool TestVirtualKey(int vk, int flags, bool down)
+    {
+        if (!down) return heldKeys.Contains(vk);
+        char key = AvailableKey(vk, flags);
+        if (key == '*' || key == '/') return true;
+        if (key == '\0' || engine.Mode == Engine.Number) return false;
+        if (engine.State != St.Idle) return true;
+        return key != '.' || engine.HasRelated;
+    }
+
+    internal void ObserveVirtualKey(int vk, bool down)
+    {
+        if (IsShift(vk))
+        {
+            if (down) { if (!shiftAlone) { shiftAlone = true; shiftDown = DateTime.UtcNow; } }
+            else
+            {
+                if (shiftAlone && settings["ShiftToggle"] != 0 && (DateTime.UtcNow - shiftDown).TotalMilliseconds < 350)
+                    BeginInvoke(new Action(TogglePause));
+                shiftAlone = false;
+            }
+        }
+        else shiftAlone = false;
+    }
+
+    internal bool ProcessVirtualKey(int vk, int flags, bool down)
+    {
+        ObserveVirtualKey(vk, down);
+        if (IsShift(vk)) return false;
+        if (!down) return heldKeys.Remove(vk);
+        char key = AvailableKey(vk, flags);
+        if (key == '\0' || !HandleKey(key)) return false;
+        heldKeys.Add(vk);
+        return true;
+    }
+
+    internal void SetTsfFocus(bool focused)
+    {
+        if (!focused)
+        {
+            heldKeys.Clear();
+            shiftAlone = false;
+            Hide();
+        }
+        else if (!paused && !Visible) Show();
+    }
+
+    internal void ReportTsfDeliveryFailure()
+    {
+        engine.Note = "未能上字";
+        Native.MessageBeep(0);
+        Invalidate();
     }
 
     private readonly HashSet<int> heldKeys = new HashSet<int>();
@@ -1016,11 +1069,7 @@ internal sealed class Q9Panel : Form
         }
         else if (hit("SPACE_BUT")) Native.Tap(0x20);
         else if (hit("MINUS_BUT")) engine.Key('-');
-        else if (hit("PLUS_BUT"))
-        {
-            if (engine.Kind == "phrase" && engine.Last.Length != 0) engine.CyclePhraseLength();
-            else engine.Key('+');
-        }
+        else if (hit("PLUS_BUT")) engine.Key('+');
         else if (hit("PRE_PAGE_BUT")) { settings["Top"] = 1; Dock_(true); }
         else if (hit("NEXT_PAGE_BUT")) { settings["Top"] = 0; Dock_(false); }
         else if (ZeroKey.Contains(p)) engine.Key('0');
@@ -1040,7 +1089,8 @@ internal sealed class Q9Panel : Form
                     if (settings["DirectTopLeft"] == 0) tone = tone == '7' ? '\0' : tone == '1' ? '9' : tone;
                     engine.MouseKey((char)('0' + key), tone);
                 }
-                else if (!(corner && settings["DirectTopLeft"] != 0 && engine.PickSmall(key - 1))) engine.Key((char)('0' + key));
+                else if (!ShowCandidateCorner(cell, p, key - 1) &&
+                    !(corner && settings["DirectTopLeft"] != 0 && engine.PickSmall(key - 1))) engine.Key((char)('0' + key));
                 break;
             }
         Invalidate();
@@ -1140,7 +1190,9 @@ internal sealed class Q9Panel : Form
 
     private void OpenQuery(Point at)
     {
+        IntPtr target = Native.GetForegroundWindow();
         menu.Items.Clear();
+        Item(menu.Items, "拼音檢字", false, delegate { OpenPinyinLookup("", false, target); });
         Item(menu.Items, "九方說明", false, OpenHelp);
         Item(menu.Items, "開啟自定資料夾", false, delegate { Directory.CreateDirectory(data.UserDir); Process.Start(data.UserDir); });
         menu.Show(this, at);
@@ -1154,8 +1206,478 @@ internal sealed class Q9Panel : Form
 
     protected override void Dispose(bool disposing)
     {
-        if (disposing) { menu.Dispose(); if (skin != null) skin.Dispose(); }
+        if (disposing)
+        {
+            if (phraseWindow != null) phraseWindow.Dispose();
+            if (pinyinLookup != null) pinyinLookup.Dispose();
+            if (pronunciation != null) pronunciation.Dispose();
+            menu.Dispose();
+            if (skin != null) skin.Dispose();
+        }
         base.Dispose(disposing);
+    }
+
+    private PhraseWindow phraseWindow;
+    private PinyinLookupWindow pinyinLookup;
+    private int phraseWindowSize;
+    private System.Media.SoundPlayer pronunciation;
+
+    protected override void OnVisibleChanged(EventArgs e)
+    {
+        base.OnVisibleChanged(e);
+        if (!Visible && phraseWindow != null) phraseWindow.Hide();
+    }
+
+    private void QueueClipboardPhrase()
+    {
+        if (Capture_ || !IsHandleCreated) return;
+        BeginInvoke(new Action(delegate
+        {
+            if (engine.Kind != "phrase") return;
+            string phrase;
+            try { phrase = Clipboard.GetText(TextDataFormat.UnicodeText).Trim(); }
+            catch (ExternalException) { return; }
+            int length = Engine.Elements(phrase).Count;
+            if (length < 2 || length > 20 || phrase.Any(char.IsControl) ||
+                data.UserLines(engine.Lang, "Q9PHRASE.TXT").Contains(phrase)) return;
+            int language = engine.Lang;
+            IntPtr target = Native.GetForegroundWindow();
+            DialogResult add;
+            try
+            {
+                add = MessageBox.Show(this, "增加詞組： \"" + phrase + "\"", "相關詞庫",
+                    MessageBoxButtons.YesNo, MessageBoxIcon.Question, MessageBoxDefaultButton.Button2);
+            }
+            finally { if (target != IntPtr.Zero) Native.Activate(target); }
+            if (add != DialogResult.Yes) return;
+            try
+            {
+                if (data.AddUserPhrase(language, phrase) && engine.Lang == language && engine.Kind == "phrase")
+                {
+                    engine.OpenPhrases();
+                    Invalidate();
+                }
+            }
+            catch (IOException ex) { MessageBox.Show(this, ex.Message, "未能儲存詞組"); }
+            catch (UnauthorizedAccessException ex) { MessageBox.Show(this, ex.Message, "未能儲存詞組"); }
+        }));
+    }
+
+    private void UpdatePhraseWindow()
+    {
+        if (!Visible || engine.Kind != "phrase")
+        {
+            if (phraseWindow != null && phraseWindow.Visible) phraseWindow.Hide();
+            return;
+        }
+        int size = settings["Size"];
+        if (phraseWindow == null || phraseWindowSize != size)
+        {
+            if (phraseWindow != null) phraseWindow.Dispose();
+            phraseWindow = new PhraseWindow(skin.Get("phrase_table.png"), engine, Press, delegate { Edit("Q9PHRASE.TXT"); });
+            phraseWindowSize = size;
+        }
+        var area = Screen.FromRectangle(Bounds).WorkingArea;
+        int x = Left - phraseWindow.Width;
+        if (x < area.Left) x = Right;
+        x = Math.Max(area.Left, Math.Min(x, area.Right - phraseWindow.Width));
+        int y = Math.Max(area.Top, Math.Min(Top, area.Bottom - phraseWindow.Height));
+        phraseWindow.Location = new Point(x, y);
+        phraseWindow.Invalidate();
+        if (!phraseWindow.Visible) phraseWindow.Show();
+    }
+
+    private bool ShowCandidateCorner(RectangleF cell, PointF point, int index)
+    {
+        if (Capture_ || engine.State != St.Select || engine.TextList || engine.LookupSym || engine.SymbolCode) return false;
+        if (engine.Kind != "code" && engine.Kind != "rel" && engine.Kind != "lookup-result") return false;
+        char corner = CornerOf(cell, point);
+        string character = engine.Cand[index];
+        if (corner == '\0' || character == null || character == Tbl.Hidden || character == Tbl.Blank ||
+            Engine.Elements(character).Count != 1) return false;
+        IntPtr target = Native.GetForegroundWindow();
+        menu.Items.Clear();
+        menu.Items.Add(new ToolStripLabel("查詢：" + character));
+        menu.Items.Add(new ToolStripSeparator());
+        if (corner == '7' || corner == '9')
+        {
+            string[] fields = data.Info(engine.Lang, character);
+            if (corner == '7')
+            {
+                var info = Item(menu.Items, "資料", false, null);
+                foreach (string line in engine.InfoLines(character))
+                    info.DropDownItems.Add(new ToolStripLabel(line));
+                info.Enabled = info.DropDownItems.Count > 0;
+            }
+            Item(menu.Items, "粵語發音", false, delegate { SpeakCharacter(character, true); });
+            Item(menu.Items, "普通話發音", false, delegate { SpeakCharacter(character, false); });
+            if (corner == '7')
+            {
+                string reading = fields != null && fields.Length > 3 ? fields[3].Split(',', '/', ';')[0] : "";
+                Item(menu.Items, "近音", false, delegate { OpenPinyinLookup(reading, false, target); }).Enabled = reading.Length > 0;
+            }
+            else
+            {
+                Item(menu.Items, "詞庫功能", false, delegate { engine.StartPhrases(character, false); });
+                Item(menu.Items, "部首筆劃查字", false, delegate { engine.ShowLookupMethods(); });
+            }
+        }
+        else if (corner == '1')
+            Item(menu.Items, "漢英字典", false,
+                delegate { Process.Start("https://en.wiktionary.org/wiki/" + Uri.EscapeDataString(character)); });
+        else
+        {
+            if (data.Files.Exists(@"chdict\chdict.exe"))
+                Item(menu.Items, "九方漢語字典", false, delegate
+                {
+                    string path = data.Files.FilePath(@"chdict\chdict.exe");
+                    Process.Start(new ProcessStartInfo(path, "\"" + character + "\"") { WorkingDirectory = Path.GetDirectoryName(path) });
+                });
+            Item(menu.Items, "漢典", false,
+                delegate { Process.Start("https://www.zdic.net/hans/" + Uri.EscapeDataString(character)); });
+        }
+        menu.Show(this, Point.Round(point));
+        return true;
+    }
+
+    private void OpenPinyinLookup(string query, bool cantonese, IntPtr target = default(IntPtr))
+    {
+        if (pinyinLookup != null)
+        {
+            pinyinLookup.Activate();
+            return;
+        }
+        if (target == IntPtr.Zero) target = Native.GetForegroundWindow();
+        int language = engine.Lang;
+        var lookup = new PinyinLookupWindow(query, cantonese, language, data);
+        pinyinLookup = lookup;
+        lookup.FormClosed += delegate
+        {
+            pinyinLookup = null;
+            if (IsDisposed) return;
+            if (target != IntPtr.Zero) Native.Activate(target);
+            if (lookup.SelectedCharacter != null && engine.Lang == language && target != IntPtr.Zero &&
+                Native.GetForegroundWindow() == target)
+            {
+                engine.PickLookupCharacter(lookup.SelectedCharacter);
+                Invalidate();
+            }
+        };
+        lookup.Show();
+    }
+
+    private void SpeakCharacter(string character, bool cantonese)
+    {
+        try
+        {
+            byte[] wave = null;
+            if (cantonese)
+            {
+                string traditional = engine.Lang == 0 ? character : data.Convert(1, character);
+                byte[] code = Dbcs.Encode(0, traditional);
+                if (code != null && data.Files.Exists("Q9CT_SND.DAT"))
+                    wave = CantoneseRecording.Read(data.Files.Open("Q9CT_SND.DAT"), code);
+            }
+            else
+            {
+                string[] fields = data.Info(engine.Lang, character);
+                if (fields != null && fields.Length > 3 && data.Files.Exists("PYB.UWL"))
+                    wave = MandarinRecording.Read(data.Files.Open("PYB.UWL"), fields[3].Split(',', '/', ';')[0]);
+            }
+            if (wave != null)
+            {
+                if (pronunciation != null) { pronunciation.Stop(); pronunciation.Dispose(); }
+                pronunciation = new System.Media.SoundPlayer(new MemoryStream(wave));
+                pronunciation.Play();
+                return;
+            }
+        }
+        catch (IOException) { }
+        catch (InvalidOperationException) { }
+        MessageBox.Show(this, cantonese ? "未有呢個字嘅粵語錄音。" : "未有呢個字嘅普通話錄音。",
+            "發音", MessageBoxButtons.OK, MessageBoxIcon.Information);
+    }
+}
+
+// PYB.UWL: 音節檔名同長度表，之後依序放 WAV。
+internal static class MandarinRecording
+{
+    internal static byte[] Read(Stream file, string spelling)
+    {
+        using (var reader = new BinaryReader(file))
+        {
+            if (file.Length < 20 || Encoding.ASCII.GetString(reader.ReadBytes(4)) != ".uwl") return null;
+            uint directory = reader.ReadUInt32(), directorySize = reader.ReadUInt32(), audioSize = reader.ReadUInt32();
+            int count = reader.ReadInt32();
+            long audio = (long)directory + directorySize;
+            if (count < 0 || directory < 20 || count * 6L > directorySize || audio + audioSize > file.Length) return null;
+            file.Position = directory;
+            long offset = 0;
+            string wanted = spelling + ".wav";
+            for (int i = 0; i < count && file.Position + 6 <= audio; i++)
+            {
+                uint length = reader.ReadUInt32();
+                int nameLength = reader.ReadUInt16();
+                if (nameLength > audio - file.Position || offset + length > audioSize) return null;
+                string name = Encoding.ASCII.GetString(reader.ReadBytes(nameLength)).TrimEnd('\0');
+                if (name.Equals(wanted, StringComparison.OrdinalIgnoreCase))
+                {
+                    if (length < 44 || length > 1000000) return null;
+                    file.Position = audio + offset;
+                    return reader.ReadBytes((int)length);
+                }
+                offset += length;
+            }
+        }
+        return null;
+    }
+}
+
+// Q9CT_SND.DAT: Big5 字索引、音節索引、WAV。欄位對應 FUN_1800ac180 / FUN_1800abfe0。
+internal static class CantoneseRecording
+{
+    private static readonly int[] Key = { 17, 3, 21, 5, 11, 3, 13, 11, 7 };
+
+    private static string Decode(byte[] row, int offset, int length)
+    {
+        var result = new StringBuilder(length);
+        for (int i = 0; i < length; i++)
+        {
+            byte ch = (byte)((BitConverter.ToUInt16(row, offset + 2 * i) - Key[i] * (i + 1)) >> 1);
+            if (ch == 0) break;
+            result.Append((char)ch);
+        }
+        return result.ToString();
+    }
+
+    internal static byte[] Read(Stream file, byte[] code)
+    {
+        using (var reader = new BinaryReader(file))
+        {
+            int characters = reader.ReadInt32();
+            if (characters < 0 || 8L + characters * 116L > file.Length) return null;
+            string wanted = new string(new[] { (char)code[0], (char)code[1] });
+            string spelling = null;
+            for (int i = 0; i < characters; i++)
+            {
+                byte[] row = reader.ReadBytes(116);
+                if (row[6] == 0 || Decode(row, 0, 3) != wanted) continue;
+                spelling = Decode(row, 8, 9);
+                break;
+            }
+            if (string.IsNullOrEmpty(spelling)) return null;
+            file.Position = 4L + characters * 116L;
+            int recordings = reader.ReadInt32();
+            long audio = file.Position + 28L * recordings;
+            if (recordings < 0 || audio > file.Length) return null;
+            for (int i = 0; i < recordings; i++)
+            {
+                byte[] row = reader.ReadBytes(28);
+                if (!Decode(row, 0, 9).Equals(spelling, StringComparison.OrdinalIgnoreCase)) continue;
+                uint offset = BitConverter.ToUInt32(row, 20), length = BitConverter.ToUInt32(row, 24);
+                if (length < 44 || length > 1000000 || audio + offset + length > file.Length) return null;
+                file.Position = audio + offset;
+                return reader.ReadBytes((int)length);
+            }
+        }
+        return null;
+    }
+}
+
+internal sealed class PhraseWindow : Form
+{
+    private const int DesignWidth = 463, DesignHeight = 260;
+    private static readonly Rectangle CloseBox = new Rectangle(435, 4, 21, 21);
+    private static readonly Rectangle Longer = new Rectangle(16, 228, 83, 28);
+    private static readonly Rectangle Previous = new Rectangle(148, 228, 83, 28);
+    private static readonly Rectangle Next = new Rectangle(247, 228, 83, 28);
+    private static readonly Rectangle EditBox = new Rectangle(387, 221, 74, 37);
+    private readonly Image background;
+    private readonly Engine engine;
+    private readonly Action<char> press;
+    private readonly Action edit;
+
+    internal PhraseWindow(Image background, Engine engine, Action<char> press, Action edit)
+    {
+        this.background = background;
+        this.engine = engine;
+        this.press = press;
+        this.edit = edit;
+        Text = "詞語／自定短句";
+        AutoScaleMode = AutoScaleMode.None;
+        FormBorderStyle = FormBorderStyle.None;
+        ShowInTaskbar = false;
+        StartPosition = FormStartPosition.Manual;
+        DoubleBuffered = true;
+        ClientSize = background == null ? new Size(DesignWidth, DesignHeight) : background.Size;
+    }
+
+    protected override bool ShowWithoutActivation { get { return true; } }
+
+    protected override CreateParams CreateParams
+    {
+        get { var p = base.CreateParams; p.ExStyle |= 0x08000000 | 0x80 | 0x8; return p; }
+    }
+
+    protected override void WndProc(ref Message m)
+    {
+        if (m.Msg == 0x21) { m.Result = (IntPtr)3; return; }
+        base.WndProc(ref m);
+    }
+
+    private static Rectangle Cell(int index)
+    {
+        return new Rectangle(16 + index % 3 * 147, 35 + (2 - index / 3) * 62, 135, 56);
+    }
+
+    private Rectangle Scale(Rectangle design)
+    {
+        return Rectangle.FromLTRB(design.Left * Width / DesignWidth, design.Top * Height / DesignHeight,
+            design.Right * Width / DesignWidth, design.Bottom * Height / DesignHeight);
+    }
+
+    protected override void OnPaint(PaintEventArgs e)
+    {
+        base.OnPaint(e);
+        if (background == null) e.Graphics.Clear(Color.FromArgb(38, 38, 38));
+        else e.Graphics.DrawImageUnscaled(background, 0, 0);
+        string face = engine.Lang == 0 ? "MingLiU_HKSCS" : "SimSun";
+        using (var titleFont = new Font(face, Math.Max(9f, 17f * Height / DesignHeight), GraphicsUnit.Pixel))
+        {
+            TextRenderer.DrawText(e.Graphics, Text, titleFont, Scale(new Rectangle(7, 0, 419, 25)), Color.White,
+                TextFormatFlags.VerticalCenter | TextFormatFlags.Left | TextFormatFlags.NoPadding);
+            if (background == null)
+            {
+                foreach (var caption in new[] { Tuple.Create(CloseBox, "×"), Tuple.Create(Longer, "更長詞語"),
+                    Tuple.Create(Previous, "上頁"), Tuple.Create(Next, "下頁"), Tuple.Create(EditBox, "編輯") })
+                    TextRenderer.DrawText(e.Graphics, caption.Item2, titleFont, Scale(caption.Item1), Color.White,
+                        TextFormatFlags.VerticalCenter | TextFormatFlags.HorizontalCenter);
+            }
+        }
+        for (int i = 0; i < engine.Cand.Length; i++)
+        {
+            Rectangle bounds = Scale(Cell(i));
+            if (background == null) e.Graphics.FillRectangle(Brushes.WhiteSmoke, bounds);
+            string phrase = engine.Cand[i];
+            if (phrase == null) continue;
+            bounds.Inflate(-Math.Max(2, Width * 5 / DesignWidth), 0);
+            int count = Engine.Elements(phrase).Count;
+            float fontSize = Math.Min(bounds.Height * 0.74f, (float)bounds.Width / Math.Max(3, count));
+            using (var font = new Font(face, Math.Max(8f, fontSize), GraphicsUnit.Pixel))
+                TextRenderer.DrawText(e.Graphics, phrase, font, bounds, Color.Black, TextFormatFlags.Left |
+                    TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPadding);
+        }
+        if (!engine.Cand.Any(c => c != null))
+            using (var font = new Font(face, Math.Max(10f, 25f * Height / DesignHeight), GraphicsUnit.Pixel))
+                TextRenderer.DrawText(e.Graphics, "未有詞語", font, Scale(Cell(4)), Color.Black,
+                    TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
+    }
+
+    protected override void OnMouseUp(MouseEventArgs e)
+    {
+        base.OnMouseUp(e);
+        if (e.Button != MouseButtons.Left || engine.Kind != "phrase") return;
+        if (Scale(CloseBox).Contains(e.Location)) { press('.'); Hide(); }
+        else if (Scale(Longer).Contains(e.Location)) press('+');
+        else if (Scale(Previous).Contains(e.Location)) press('-');
+        else if (Scale(Next).Contains(e.Location)) press('0');
+        else if (Scale(EditBox).Contains(e.Location)) edit();
+        else
+            for (int i = 0; i < engine.Cand.Length; i++)
+                if (engine.Cand[i] != null && Scale(Cell(i)).Contains(e.Location))
+                {
+                    press((char)('1' + i));
+                    Hide();
+                    break;
+                }
+        Invalidate();
+    }
+}
+
+internal sealed class PinyinLookupWindow : Form
+{
+    private readonly TextBox query = new TextBox { MaxLength = 16, Width = 190 };
+    private readonly ComboBox dialect = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 85 };
+    private readonly ListBox characters = new ListBox { MultiColumn = true, ColumnWidth = 52, Dock = DockStyle.Fill };
+    private readonly Label status = new Label { AutoSize = true, Anchor = AnchorStyles.Left };
+    private readonly Q9Data data;
+    private readonly int language;
+    internal string SelectedCharacter { get; private set; }
+
+    internal PinyinLookupWindow(string initialQuery, bool cantonese, int language, Q9Data data)
+    {
+        this.data = data;
+        this.language = language;
+        Text = "拼音檢字";
+        StartPosition = FormStartPosition.CenterScreen;
+        FormBorderStyle = FormBorderStyle.SizableToolWindow;
+        ShowInTaskbar = false;
+        TopMost = true;
+        ClientSize = new Size(475, 280);
+        MinimumSize = new Size(425, 250);
+
+        var layout = new TableLayoutPanel { Dock = DockStyle.Fill, RowCount = 3, ColumnCount = 1, Padding = new Padding(9) };
+        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        Controls.Add(layout);
+
+        var searchBar = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Dock = DockStyle.Fill };
+        dialect.Items.Add("普通話");
+        if (language == 0) dialect.Items.Add("粵語");
+        dialect.SelectedIndex = cantonese && language == 0 ? 1 : 0;
+        query.AccessibleName = "拼音";
+        query.Text = initialQuery;
+        var search = new Button { Text = "檢字", AutoSize = true };
+        search.Click += delegate { Search(); };
+        searchBar.Controls.AddRange(new Control[] { dialect, query, search });
+        layout.Controls.Add(searchBar, 0, 0);
+
+        var characterFont = new Font(language == 0 ? "MingLiU_HKSCS" : "SimSun", 21);
+        characters.Font = characterFont;
+        characters.Disposed += delegate { characterFont.Dispose(); };
+        characters.AccessibleName = "候選字";
+        characters.DoubleClick += delegate { SelectCharacter(); };
+        characters.KeyDown += delegate(object sender, KeyEventArgs e)
+        {
+            if (e.KeyCode != Keys.Enter) return;
+            e.Handled = e.SuppressKeyPress = true;
+            SelectCharacter();
+        };
+        layout.Controls.Add(characters, 0, 1);
+
+        var buttons = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Dock = DockStyle.Fill };
+        var select = new Button { Text = "選字", AutoSize = true, Enabled = false };
+        select.Click += delegate { SelectCharacter(); };
+        characters.SelectedIndexChanged += delegate { select.Enabled = characters.SelectedIndex >= 0; };
+        var cancel = new Button { Text = "取消", AutoSize = true, DialogResult = DialogResult.Cancel };
+        cancel.Click += delegate { Close(); };
+        buttons.Controls.AddRange(new Control[] { select, cancel, status });
+        layout.Controls.Add(buttons, 0, 2);
+        AcceptButton = search;
+        CancelButton = cancel;
+        Shown += delegate { query.Focus(); query.SelectAll(); };
+        if (initialQuery.Length > 0) Search();
+    }
+
+    private void Search()
+    {
+        characters.BeginUpdate();
+        try
+        {
+            characters.Items.Clear();
+            string[] found = data.FindPinyin(language, query.Text, dialect.SelectedIndex == 1).ToArray();
+            characters.Items.AddRange(found);
+            status.Text = found.Length == 0 ? "未有字" : found.Length + " 字";
+            if (found.Length > 0) characters.SelectedIndex = 0;
+        }
+        finally { characters.EndUpdate(); }
+    }
+
+    private void SelectCharacter()
+    {
+        SelectedCharacter = characters.SelectedItem as string;
+        if (SelectedCharacter != null) Close();
     }
 }
 
@@ -1225,6 +1747,7 @@ internal static class Gdi
     [DllImport("gdi32.dll")] private static extern IntPtr SelectObject(IntPtr dc, IntPtr obj);
     [DllImport("gdi32.dll")] private static extern bool DeleteObject(IntPtr obj);
     [DllImport("gdi32.dll")] private static extern uint SetTextColor(IntPtr dc, int color);
+    [DllImport("gdi32.dll")] private static extern uint SetBkColor(IntPtr dc, int color);
     [DllImport("gdi32.dll")] private static extern int SetBkMode(IntPtr dc, int mode);
     [DllImport("gdi32.dll")] private static extern uint SetTextAlign(IntPtr dc, uint align);
     [DllImport("gdi32.dll", CharSet = CharSet.Unicode)] private static extern bool TextOutW(IntPtr dc, int x, int y, string text, int length);
@@ -1232,6 +1755,9 @@ internal static class Gdi
     [DllImport("gdi32.dll")] private static extern IntPtr CreateCompatibleDC(IntPtr dc);
     [DllImport("gdi32.dll")] private static extern bool DeleteDC(IntPtr dc);
     [DllImport("gdi32.dll")] private static extern IntPtr CreateDIBSection(IntPtr dc, ref BITMAPINFOHEADER info, uint usage, out IntPtr bits, IntPtr section, uint offset);
+    [DllImport("gdi32.dll")] private static extern IntPtr CreateBitmap(int width, int height, uint planes, uint bitCount, byte[] bits);
+    [DllImport("gdi32.dll")] private static extern bool StretchBlt(IntPtr dc, int x, int y, int width, int height,
+        IntPtr source, int sourceX, int sourceY, int sourceWidth, int sourceHeight, uint op);
 
     [StructLayout(LayoutKind.Sequential)]
     private struct BITMAPINFOHEADER
@@ -1291,6 +1817,28 @@ internal static class Gdi
         IntPtr brush = CreateSolidBrush(color.R | color.G << 8 | color.B << 16);
         FillRect(dc, ref r, brush);
         DeleteObject(brush);
+    }
+
+    // FUN_180004ad0：每個字佔 30×30，拎頭 29×29；用 SRCAND 保留白色部分下面嘅皮膚。
+    internal static void Radical(IntPtr dc, byte[] bitmap, int index, int x, int baseline, int size)
+    {
+        const int tilePitch = 30, tileSize = 29, columns = 20;
+        int y = baseline - size * 3 / 4;
+        int sourceX = index % columns * tilePitch, sourceY = index / columns * tilePitch;
+        IntPtr mask = CreateBitmap(Q9Data.RadicalBitmapWidth, Q9Data.RadicalBitmapHeight, 1, 1, bitmap);
+        if (mask == IntPtr.Zero) return;
+        IntPtr source = CreateCompatibleDC(dc);
+        if (source != IntPtr.Zero)
+        {
+            IntPtr old = SelectObject(source, mask);
+            int oldText = (int)SetTextColor(dc, 0), oldBackground = (int)SetBkColor(dc, 0xffffff);
+            StretchBlt(dc, x, y, size, size, source, sourceX, sourceY, tileSize, tileSize, 0x008800C6);
+            SetBkColor(dc, oldBackground);
+            SetTextColor(dc, oldText);
+            SelectObject(source, old);
+            DeleteDC(source);
+        }
+        DeleteObject(mask);
     }
 
     internal static void Text(IntPtr dc, string text, string face, int size, Color color, int x, int baseline)
@@ -1394,6 +1942,19 @@ internal static class Program
         engine.Output = sent.Add;
         engine.RelMode = 0;
         engine.UpdateOrder = false;      // 唔好俾調前改咗後面測試用嘅次序
+        {
+            var radicals = new Engine(data);
+            radicals.RelMode = 3;
+            radicals.SetMode(Engine.Glyph);
+            Keys(radicals, "0031");
+            Check(string.Concat(radicals.Cand) == "扌支寸十土士耒赤走", "繁體部首第一頁");
+            Check(data.RadicalBitmapIndex("扌") == 0 && data.RadicalBitmapIndex("艹") == 1, "原版部首點陣字");
+            radicals.SetLang(1);
+            Keys(radicals, "0031");
+            Check(string.Concat(radicals.Cand) == "廾扌支寸屮巾十土士", "簡體部首第一頁");
+            Keys(radicals, "8");
+            Check(radicals.Kind == "lookup-result" && radicals.Cand.Contains("土"), "簡體土部字表");
+        }
         // 自動調前 (FUN_1800bc630)：筆劃揀第 13 個字，搬去第 9 格，第 9 至 12 個順次後移
         {
             var copy = new Tbl((byte[])data.Table(0, "STIMDATA").Bytes.Clone());
@@ -1512,9 +2073,21 @@ internal static class Program
         engine.SetLang(0);
         engine.Last = "人";
         Keys(engine, "+"); Check(engine.Kind == "phrase" && engine.Cand.Contains("人體"), "詞輸入讀取原版內置詞庫");
-        engine.CyclePhraseLength();
+        Keys(engine, "+");
         Check(engine.Cand.Any(s => s != null) && engine.Cand.Where(s => s != null).All(s => Engine.Elements(s).Count == 3),
             "詞輸入切換三字詞");
+        engine.StartPhrases("人", false);
+        Check(engine.Cand.Contains("人體"), "由候選字開獨立詞語視窗");
+        engine.Key((char)('1' + Array.IndexOf(engine.Cand, "人體")));
+        Check(sent.Last() == "人體", "候選字未上字時送出完整詞語");
+        engine.StartPhrases("人", true);
+        engine.Key((char)('1' + Array.IndexOf(engine.Cand, "人體")));
+        Check(sent.Last() == "體", "詞首已上字時只送出詞尾");
+        Check(data.FindPinyin(0, "jiǔ", false).Contains("九") &&
+            !data.FindPinyin(0, "jiu1", false).Contains("九") && data.FindPinyin(0, "GAU", true).Contains("九"),
+            "獨立拼音檢字讀取普通話聲調同粵語讀音");
+        engine.PickLookupCharacter("九");
+        Check(sent.Last() == "九", "拼音檢字送出候選字");
         Keys(engine, ".");
         engine.SetLang(1); engine.SetMode(Engine.Pinyin);
         Keys(engine, "165"); Check(engine.Cand.Contains("双"), "簡體拼音");
@@ -1538,28 +2111,53 @@ internal static class Program
     private static void TestInput(Q9Panel panel, bool viaHook)
     {
         if (viaHook) { panel.AcceptInjected = true; panel.StartHook(); }
+        var cases = new[]
+        {
+            new { Mode = Engine.Stroke, Keys = "7105", Text = "走" },
+            new { Mode = Engine.Glyph, Keys = "98901", Text = "修" },
+            new { Mode = Engine.Pinyin, Keys = "1651", Text = "雙" },
+            new { Mode = Engine.Zhuyin, Keys = "3703", Text = "西" },
+            new { Mode = Engine.Canton, Keys = "303", Text = "人" },
+            new { Mode = Engine.Emoji, Keys = "11", Text = "😃" }
+        };
         using (var host = new Form { Text = "九方輸入測試", ClientSize = new Size(320, 70) })
         using (var field = new TextBox { Left = 12, Top = 15, Width = 270 })
         using (var timer = new Timer { Interval = 250 })
         {
-            int phase = 0;
-            string received = "";
+            int index = 0, waitForFocus = 0;
+            bool sent = false;
+            string failure = null;
             host.Controls.Add(field);
             host.Shown += delegate { panel.Show(); Native.Activate(host.Handle); field.Focus(); timer.Start(); };
             timer.Tick += delegate
             {
-                phase++;
-                if (phase == 1 && Native.GetForegroundWindow() == host.Handle)
+                if (sent)
                 {
-                    // 橫 土 選字 → 第 5 格「走」；經鍵盤攔截時送數字鍵盤虛擬鍵
-                    foreach (char k in "7105") if (viaHook) Native.Tap((ushort)(0x60 + k - '0')); else panel.Press(k);
+                    if (field.Text != cases[index].Text)
+                        failure = cases[index].Keys + " 預期「" + cases[index].Text + "」，收到「" + field.Text + "」";
+                    index++;
+                    sent = false;
+                }
+                if (failure == null && index < cases.Length && Native.GetForegroundWindow() != host.Handle)
+                {
+                    if (++waitForFocus < 8) return;
+                    failure = "測試文字框未取得焦點";
+                }
+                if (failure != null || index == cases.Length)
+                {
+                    timer.Stop(); panel.Hide(); host.Close();
                     return;
                 }
-                if (phase < 4) return;
-                timer.Stop(); received = field.Text; panel.Hide(); host.Close();
+                waitForFocus = 0;
+                field.Clear();
+                panel.SetModeForPreview(cases[index].Mode);
+                foreach (char k in cases[index].Keys)
+                    if (viaHook) Native.Tap((ushort)(0x60 + k - '0')); else panel.Press(k);
+                sent = true;
             };
             Application.Run(host);
-            if (received != "走") throw new InvalidDataException("未能將選字送到測試文字框，收到「" + received + "」");
+            if (failure != null) throw new InvalidDataException("未能將選字送到測試文字框：" + failure);
+            if (index != cases.Length) throw new InvalidDataException("輸入測試提早結束");
         }
     }
 
@@ -1600,6 +2198,9 @@ internal static class Program
                 }
                 if (args.Length > 0 && args[0] == "--test-input") { TestInput(panel, false); return 0; }
                 if (args.Length > 0 && args[0] == "--test-hook") { TestInput(panel, true); return 0; }
+#if Q9_TSF
+                if (args.Length == 1 && args[0] == "/tsf") { TsfHost.Run(panel); return 0; }
+#endif
                 panel.StartHook();
                 Application.Run(panel);
             }
