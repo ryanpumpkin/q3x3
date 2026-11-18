@@ -429,7 +429,8 @@ internal sealed class Q9Panel : Form
         if (engine.NoChar)
         {
             // 「未有字」：筆劃字形用補碼掣 (字形檢字 / 補音) 同三行提示；其他輸入法保留預設掣、冇提示 (原版截圖)
-            key0 = mode == Engine.Stroke ? "選字" : "標點";   // 筆劃保留之前嘅碼，仲可以選字 (原版截圖 154)
+            key0 = mode == Engine.Stroke && !engine.ExtraNoChar ? "選字" : "標點";   // 筆劃保留之前嘅碼，仲可以選字 (原版截圖 154)
+            if (engine.ExtraNoChar) { lines = new[] { "沒有中文字供選用", "請輸入其他字", "其他版本可有多字" }; return; }   // 預設掣 (G892-0)
             if (mode == Engine.Stroke || mode == Engine.Glyph)
             {
                 minus = "button10_shapeExtra.png"; plus = "button11_pyExtra.png";
@@ -455,11 +456,12 @@ internal sealed class Q9Panel : Form
         {
             if (engine.Kind == "lookup-menu") { minus = "button10_pgup.png"; plus = "button11_pyExtra.png"; lines = new[] { "選檢字方法" }; return; }
             // 補碼第一步：字形 ('E') 兩邊都係空白掣，補音 ('e') 左邊係上頁
-            if (engine.Kind == "shape-extra") { minus = "button10_blank.png"; plus = "button11_blank.png"; lines = new[] { "選字形結構" }; return; }
+            // 補形：原版 0 鍵「選字」，提示照用補音嗰兩行 (原版截圖 G892-)
+            if (engine.Kind == "shape-extra") { minus = "button10_blank.png"; plus = "button11_blank.png"; key0 = "選字"; lines = new[] { "請選字的聲母作補音", "或按０選姓氏／外字" }; return; }
             if (engine.Kind == "sound-extra")
             {
                 minus = "button10_pgup.png"; plus = "button11_blank.png";
-                key0 = "姓氏"; lines = new[] { "請選字的聲母作補音", "或按０選姓氏／外字" }; return;
+                key0 = "選字"; lines = new[] { "請選字的聲母作補音", "或按０選姓氏／外字" }; return;   // 原版截圖 G892+
             }
             key0 = "下頁";
             // 標點頁 ('P' 一碼) 對原版係取碼狀態：筆劃字形顯示上頁 + 補音，其他輸入法顯示常用字句 + 詞語
@@ -499,6 +501,7 @@ internal sealed class Q9Panel : Form
                 return;
             }
             lines = browse;
+            if (engine.ExtraResult) return;   // 補形／補音揀完嘅清單：兩邊用預設掣 (原版截圖 G892+0、G892-5)
             if (engine.Kind == "emoji" || mode == Engine.Pinyin || mode == Engine.Zhuyin || mode == Engine.Canton)
             { minus = "button10_pgup.png"; plus = "button11_nextpage.png"; }
             else
@@ -633,7 +636,7 @@ internal sealed class Q9Panel : Form
             for (int key = 1; key <= 9; key++)
             {
                 // PY0 / PYREL / PYNONE 本身已經畫咗 7 鍵灰格 (有圓角)，唔使另外填
-                bool blank = select && engine.Kind != "radical-stroke" && engine.Cand[key - 1] == null || PinyinDisabled(key);
+                bool blank = select && engine.Kind != "radical-stroke" && engine.Kind != "sound-extra" && engine.Cand[key - 1] == null || PinyinDisabled(key);
                 if (blank) g.FillRectangle(empty, GrayCell(key));
             }
             if (image != null)
@@ -677,7 +680,7 @@ internal sealed class Q9Panel : Form
             int big = Pt(skin.Value("UI.FontSize", 84)), rel = Pt(skin.Value("UI.RelTextFontSize", 72)) - 1;
             string face = FontFace;
             bool emojiList = engine.Kind == "emoji";
-            if (select || engine.Mode == Engine.Number)
+            if ((select && engine.Kind != "sound-extra") || engine.Mode == Engine.Number)
             {
                 for (int key = 1; key <= 9; key++)
                 {
@@ -699,7 +702,7 @@ internal sealed class Q9Panel : Form
                     Gdi.Text(hdc, t, emojiList ? "Segoe UI Emoji" : face, size, color, x, (int)r.Y + (int)(adjV * s));
                 }
             }
-            else if ((engine.Kind == "rel" || engine.Kind == "code" || engine.Kind == "pyhint") && !engine.NoChar)   // 「未有字」唔畫預覽
+            else if ((engine.Kind == "rel" || engine.Kind == "code" || engine.Kind == "pyhint" || engine.Kind == "sound-extra") && !engine.NoChar)   // 「未有字」唔畫預覽
             {
                 Color color = engine.Kind == "rel" ? RelColor : PreviewColor;
                 for (int key = 1; key <= 9; key++)

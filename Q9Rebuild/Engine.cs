@@ -700,7 +700,9 @@ internal sealed class Engine
     internal string Note = "";
     internal bool NoChar;                     // 「未有字」畫面
     internal bool LookupSym;
-    internal bool CantonNoCharZero;           // 粵拼「未有字」之後再撳 0                  // 由檢字選單入嘅符號頁 (原版冇四角三角形、兩邊掣同檢字選單一樣)
+    internal bool CantonNoCharZero;
+    internal bool ExtraResult;                // 補形／補音揀完嘅清單
+    internal bool ExtraNoChar;                // 補形／補音揀完冇字           // 粵拼「未有字」之後再撳 0                  // 由檢字選單入嘅符號頁 (原版冇四角三角形、兩邊掣同檢字選單一樣)
     // 原版 FUN_1800ad920 睇「上一個候選字清單」停喺第幾頁：第一頁先顯示字形檢字掣／字形 0 嘅「檢字」標點頁
     private int codePageOff;
     internal bool CodePageFirst { get { return codePageOff == 0; } }
@@ -1057,7 +1059,7 @@ internal sealed class Engine
 
     private void SetList(string kind, List<string> list, bool visualOrder)
     {
-        Kind = kind; full = list; off = 0; visual = visualOrder; LookupSym = false; PunctCheck = false;
+        Kind = kind; full = list; off = 0; visual = visualOrder; LookupSym = false; PunctCheck = false; ExtraResult = false;
         ShowPage();
     }
 
@@ -1120,7 +1122,7 @@ internal sealed class Engine
     {
         Note = "";
         bool wasNoChar = NoChar;
-        NoChar = false; CantonNoCharZero = false;
+        NoChar = false; CantonNoCharZero = false; ExtraNoChar = false;
         if (Mode == Number) return false;
         // 字形「未有字」之後原版已經清碼 (亦冇關聯字)：下一個鍵當靜止時處理，0 = 標點 (原版截圖 8250)
         if (wasNoChar && (Mode == Glyph || Mode == Pinyin || Mode == Zhuyin) && State == St.Compose && k != '' && k != '.')   // 拼音一樣 (原版截圖 6276)
@@ -1374,7 +1376,8 @@ internal sealed class Engine
         if (Mode == Pinyin) return PinyinKey(k);
         if (Mode == Zhuyin) return ZhuyinKey(k);
         if (Mode == Canton) return CantonKey(k);
-        if (k == '-' || k == '+') return OpenExtra(k == '-');
+        if (k == '+') return true;   // 取碼時「+」原版冇反應 (原版截圖 G8+)
+        if (k == '-') return OpenExtra(true);
         if (k == '\b')
         {
             Buf = Buf.Substring(0, Buf.Length - 1);
@@ -1586,18 +1589,29 @@ internal sealed class Engine
     private bool OpenExtra(bool shape)
     {
         if (Buf.Length == 0 || Main.Get(Code()).Count == 0) { Beep(); return true; }
-        SetList(shape ? "shape-extra" : "sound-extra",
-            (shape ? Enumerable.Range(1, 9).Select(i => i.ToString()) :
-                PyInitialNames.Skip(1)).ToList(), false);
+        if (shape) SetList("shape-extra", Enumerable.Range(1, 9).Select(i => i.ToString()).ToList(), false);
+        else
+        {
+            // 補音：拼音聲母圖 (PY2)，預覽 0 鍵 (選字) 嗰組字嘅第一頁 (原版截圖 G892+)
+            var preview = Main.Get(Code()).Where(ch => ch != Tbl.Blank && Data.InExtraGroup(Lang, false, 0, ch)).ToList();
+            SetList("sound-extra", preview, false);
+        }
         State = St.Select;
         return true;
     }
 
     private bool FilterExtra(bool shape, int key)
     {
-        if (shape && key == 0) { Beep(); return true; }
         var filtered = Main.Get(Code()).Where(ch => ch != Tbl.Blank && Data.InExtraGroup(Lang, shape, key, ch)).ToList();
+        if (filtered.Count == 0)
+        {
+            // 冇字：原版入「未有字」畫面，兩邊用預設掣 (原版截圖 G892-0)
+            Beep(); Buf = ""; State = St.Compose; SetList("code", new List<string>(), false);
+            NoChar = true; ExtraNoChar = true;
+            return true;
+        }
         OpenTexts("code", filtered, "沒有中文字供選用");
+        ExtraResult = State == St.Select && Kind == "code";
         return true;
     }
 
@@ -1704,7 +1718,7 @@ internal sealed class Engine
             if (State == St.Select)
             {
                 if (Kind == "shape-extra") return Lang == 0 ? "ShapeExtra.png" : "ShapeExtra_GB.png";
-                return Kind == "punct" ? "Q9_P.png" : Kind == "emojicat" ? "Q9_emoji.png" : Kind == "radical-stroke" ? "Q9_0.png" : null;
+                return Kind == "punct" ? "Q9_P.png" : Kind == "emojicat" ? "Q9_emoji.png" : Kind == "radical-stroke" ? "Q9_0.png" : Kind == "sound-extra" ? "PYREL.png" : null;
             }
             if (NoChar)
                 return Mode == Glyph ? "Q9_N.png" : Mode == Stroke ? "q9stimNone.png" : Mode == Zhuyin ? "CYNONE.png" : "PYNONE.png";
