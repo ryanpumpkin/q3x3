@@ -1056,6 +1056,7 @@ internal sealed class Q9Panel : Form
 
     protected override void OnMouseLeave(EventArgs e)
     {
+        if (queryTipShown) { queryTipShown = false; queryTip.Hide(this); }
         hovering = false; Opacity = settings["Opacity"] / 100.0;
         base.OnMouseLeave(e);
     }
@@ -1073,6 +1074,10 @@ internal sealed class Q9Panel : Form
         }
     }
 
+    private const string QueryTipText = "反向查字(查詢：資料、發音、近音、漢語字典、漢英字典、詞庫及中英文地址轉換)";
+    private readonly ToolTip queryTip = new ToolTip();
+    private bool queryTipShown;
+
     protected override void OnMouseMove(MouseEventArgs e)
     {
         base.OnMouseMove(e);
@@ -1080,6 +1085,14 @@ internal sealed class Q9Panel : Form
         PointF p = Unit(e.Location);
         Cursor want = dragging || !Buttons.Any(name => Px(skin.Area(name)).Contains(p)) ? Cursors.SizeAll : Cursors.Default;
         if (Cursor != want) Cursor = want;
+        // 查 button tooltip, worded as in the original.
+        bool overQuery = !dragging && Px(skin.Area("HELP_BUT")).Contains(p);
+        if (overQuery != queryTipShown)
+        {
+            queryTipShown = overQuery;
+            if (overQuery) queryTip.Show(QueryTipText, this, e.X + 12, e.Y + 20, 5000);
+            else queryTip.Hide(this);
+        }
         if (!dragging) return;
         Point screen = PointToScreen(e.Location);
         Location = new Point(screen.X - dragOrigin.X, screen.Y - dragOrigin.Y);
@@ -1288,11 +1301,15 @@ internal sealed class Q9Panel : Form
     {
         string text = (selected ?? "").Trim();
         if (text.Length > 200) text = text.Substring(0, 200);
+        if (text.Length == 0)
+        {
+            // Original: nothing highlighted → message box, then back to the application.
+            try { MessageBox.Show(this, "請先選取文字，然後才按", "九方", MessageBoxButtons.OK); }
+            finally { if (target != IntPtr.Zero) Native.Activate(target); }
+            return;
+        }
         menu.Items.Clear();
-        if (text.Length > 0) AddQueryItems(text, target);
-        Item(menu.Items, "拼音檢字", false, delegate { OpenPinyinLookup("", false, target); });
-        Item(menu.Items, "九方說明", false, OpenHelp);
-        Item(menu.Items, "開啟自定資料夾", false, delegate { Directory.CreateDirectory(data.UserDir); Process.Start(data.UserDir); });
+        AddQueryItems(text, target);   // original: the 查詢 menu ends at 生活易
         ShowMenu(at);
     }
 
@@ -1306,11 +1323,13 @@ internal sealed class Q9Panel : Form
     {
         var elements = Engine.Elements(text);
         string shown = elements.Count > 12 ? string.Concat(elements.Take(12)) + "…" : text;
-        menu.Items.Add(new ToolStripLabel("查詢：" + shown.Replace('\r', ' ').Replace('\n', ' ')));
+        // Original: grey 「查詢：」 on the left, the highlighted text on the right of the same row.
+        var header = new ToolStripMenuItem("查詢：") { Enabled = false, ShortcutKeyDisplayString = shown.Replace('\r', ' ').Replace('\n', ' ') };
+        menu.Items.Add(header);
         menu.Items.Add(new ToolStripSeparator());
 
-        // 字典
-        menu.Items.Add(new ToolStripLabel("中文字典"));
+        // 字典 (grey headings, as in the original)
+        menu.Items.Add(new ToolStripMenuItem("中文字典") { Enabled = false });
         if (data.Files.Exists(@"chdict\chdict.exe"))
             Item(menu.Items, "- 九方漢語字典", false, delegate
             {
@@ -1322,7 +1341,8 @@ internal sealed class Q9Panel : Form
             string url = QueryLinks.Url(link[1], text);
             Item(menu.Items, "- " + link[0], false, delegate { Open(url); });
         }
-        menu.Items.Add(new ToolStripLabel("英文字典"));
+        menu.Items.Add(new ToolStripSeparator());
+        menu.Items.Add(new ToolStripMenuItem("英文字典") { Enabled = false });
         foreach (string[] link in QueryLinks.EnglishDictionaries)
         {
             string url = QueryLinks.Url(link[1], text);
@@ -1331,34 +1351,44 @@ internal sealed class Q9Panel : Form
         menu.Items.Add(new ToolStripSeparator());
 
         // 見字查字：選取一個中文字時用同選字格四角一樣嘅功能
-        bool single = elements.Count == 1 && elements[0].Length > 0 && (elements[0][0] >= 0x2E80 || char.IsSurrogate(elements[0][0]));
-        string character = single ? elements[0] : null;
-        Item(menu.Items, "粵語發音", false, delegate { SpeakCharacter(character, true); }).Enabled = single;
-        Item(menu.Items, "普通話發音", false, delegate { SpeakCharacter(character, false); }).Enabled = single;
-        var info = Item(menu.Items, "資料.發音.近音", false, null);
-        if (single)
-        {
-            foreach (string line in engine.InfoLines(character)) info.DropDownItems.Add(new ToolStripLabel(line));
-            string[] fields = data.Info(engine.Lang, character);
-            string reading = fields != null && fields.Length > 3 ? fields[3].Split(',', '/', ';')[0] : "";
-            if (reading.Length > 0)
-            {
-                if (info.DropDownItems.Count > 0) info.DropDownItems.Add(new ToolStripSeparator());
-                Item(info.DropDownItems, "近音", false, delegate { OpenPinyinLookup(reading, false, target); });
-            }
-        }
-        info.Enabled = info.DropDownItems.Count > 0;
-        Item(menu.Items, "詞庫功能", false, delegate { engine.StartPhrases(text, false); })
-            .Enabled = elements.Count >= 1 && elements.Count <= 8 && elements.All(e => e.Length > 0 && (e[0] >= 0x2E80 || char.IsSurrogate(e[0])));
-        Item(menu.Items, "部首筆劃查字", false, delegate { engine.ShowLookupMethods(); });
+        // Character tools work on the first Chinese character of the highlighted text. As in the original,
+        // every item stays enabled; one that does not apply just beeps.
+        Func<string, bool> chinese = e => e.Length > 0 && (e[0] >= 0x2E80 || char.IsSurrogate(e[0]));
+        string character = elements.FirstOrDefault(chinese);
+        string[] fields = character != null ? data.Info(engine.Lang, character) : null;
+        string reading = fields != null && fields.Length > 3 ? fields[3].Split(',', '/', ';')[0] : "";
+        Action<Action> needCharacter = delegate(Action work) { if (character != null) work(); else Native.MessageBeep(0); };
 
-        // 對譯同地址：數字對譯會取代選取咗嘅文字
+        Item(menu.Items, "粵語發音", false, delegate { needCharacter(delegate { SpeakCharacter(character, true); }); });
+        Item(menu.Items, "普通話發音", false, delegate { needCharacter(delegate { SpeakCharacter(character, false); }); });
+        var info = Item(menu.Items, "資料、發音、近音", false, null);
+        if (character != null)
+        {
+            info.DropDownItems.Add(new ToolStripMenuItem("查詢：" + character) { Enabled = false });
+            foreach (string line in engine.InfoLines(character)) info.DropDownItems.Add(new ToolStripLabel(line));
+            info.DropDownItems.Add(new ToolStripSeparator());
+            Item(info.DropDownItems, "粵語發音", false, delegate { SpeakCharacter(character, true); });
+            Item(info.DropDownItems, "普通話發音", false, delegate { SpeakCharacter(character, false); });
+            Item(info.DropDownItems, "近音", false, delegate { OpenPinyinLookup(reading, false, target); }).Enabled = reading.Length > 0;
+        }
+        else info.Click += delegate { Native.MessageBeep(0); };
+        Item(menu.Items, "詞庫功能", false, delegate
+        {
+            if (elements.Count >= 1 && elements.Count <= 8 && elements.All(chinese)) engine.StartPhrases(text, false);
+            else Native.MessageBeep(0);
+        });
+        Item(menu.Items, "近音詞", false, delegate
+        {
+            if (reading.Length > 0) OpenPinyinLookup(reading, false, target); else Native.MessageBeep(0);
+        });
+
+        // 數字對譯 replaces the highlighted number in the application.
         int format = Math.Max(0, Math.Min(3, settings["NumFormat"]));
         string number = NumberWords.Convert(text, format, engine.Lang == 1);
-        Item(menu.Items, "數字對譯", false, delegate { Deliver(number); }).Enabled = number != null;
-        bool latin = text.Any(c => c < 0x80 && char.IsLetter(c));
-        Item(menu.Items, "英文對譯中文", false, delegate { Open(QueryLinks.Translate(text, engine.Lang == 1)); }).Enabled = latin;
-        Item(menu.Items, "中英文地址 - 互查", false, delegate { LookupAddress(text, target); });
+        Item(menu.Items, "數字對譯", false, delegate { if (number != null) Deliver(number); else Native.MessageBeep(0); });
+        Item(menu.Items, "英文對譯中文", false, delegate { Open(QueryLinks.Translate(text, engine.Lang == 1)); });
+        Item(menu.Items, "部首筆劃查字", false, delegate { engine.ShowLookupMethods(); });
+        Item(menu.Items, "中英文地址–互查", false, delegate { LookupAddress(text, target); });
         menu.Items.Add(new ToolStripSeparator());
 
         foreach (string[] link in QueryLinks.Searches)
@@ -1366,7 +1396,6 @@ internal sealed class Q9Panel : Form
             string url = QueryLinks.Url(link[1], text);
             Item(menu.Items, link[0], false, delegate { Open(url); });
         }
-        menu.Items.Add(new ToolStripSeparator());
     }
 
     // 中英文地址互查：香港政府地址查詢服務，結果可以輸入中文或英文地址，或者開 Google 地圖
@@ -1468,7 +1497,8 @@ internal sealed class Q9Panel : Form
 
     private void UpdatePhraseWindow()
     {
-        if (!Visible || engine.Kind != "phrase")
+        // 詞語／自定短句 and 自定常用 (original: 「自設常用字句 / 符號」) use the same window.
+        if (!Visible || !engine.TextList)
         {
             if (phraseWindow != null && phraseWindow.Visible) phraseWindow.Hide();
             return;
@@ -1477,9 +1507,11 @@ internal sealed class Q9Panel : Form
         if (phraseWindow == null || phraseWindowSize != size)
         {
             if (phraseWindow != null) phraseWindow.Dispose();
-            phraseWindow = new PhraseWindow(skin.Get("phrase_table.png"), engine, Press, delegate { Edit("Q9PHRASE.TXT"); });
+            phraseWindow = new PhraseWindow(skin.Get("phrase_table.png"), engine, Press,
+                delegate { Edit(engine.Kind == "fav" ? "yourAlwaysUse.txt" : "Q9PHRASE.TXT"); });
             phraseWindowSize = size;
         }
+        phraseWindow.Text = engine.Kind == "fav" ? "自設常用字句 / 符號" : "詞語／自定短句";
         var area = Screen.FromRectangle(Bounds).WorkingArea;
         int x = Left - phraseWindow.Width;
         if (x < area.Left) x = Right;
@@ -1839,14 +1871,14 @@ internal sealed class PhraseWindow : Form
         }
         if (!engine.Cand.Any(c => c != null))
             using (var font = new Font(face, Math.Max(10f, 25f * Height / DesignHeight), GraphicsUnit.Pixel))
-                TextRenderer.DrawText(e.Graphics, "未有詞語", font, Scale(Cell(4)), Color.Black,
+                TextRenderer.DrawText(e.Graphics, engine.Kind == "fav" ? "未有自定常用字句" : "未有詞語", font, Scale(Cell(4)), Color.Black,
                     TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
     }
 
     protected override void OnMouseUp(MouseEventArgs e)
     {
         base.OnMouseUp(e);
-        if (e.Button != MouseButtons.Left || engine.Kind != "phrase") return;
+        if (e.Button != MouseButtons.Left || !engine.TextList) return;
         if (Scale(CloseBox).Contains(e.Location)) { press('.'); Hide(); }
         else if (Scale(Longer).Contains(e.Location)) press('+');
         else if (Scale(Previous).Contains(e.Location)) press('-');

@@ -6,9 +6,9 @@ using System.Net;
 using System.Text;
 using System.Web.Script.Serialization;
 
-// 查 menu extras. 數字對譯, 英文對譯 and 中英文地址互查 come from older 九方 versions (documented in the shared
-// q9help.chm, not present in W10 1.1.0.0); the web links mirror W10's query table (Search*/CEDict* items)
-// but open the public sites directly instead of going through 九方's own redirect server.
+// 查 menu (W10 shows it when text is highlighted; see the original's menu in the user's screenshot).
+// The web links mirror W10's query table (Search*/CEDict* items) but open the public sites directly
+// instead of going through 九方's own redirect server; 地址互查 uses the HK government's lookup service.
 
 internal static class NumberWords
 {
@@ -234,6 +234,7 @@ internal static class QueryLinks
         new[] { "Google中英字典", "https://translate.google.com/?sl=auto&tl=zh-TW&text={0}&op=translate" },
         new[] { "雅虎中英字典", "https://tw.dictionary.search.yahoo.com/search?p={0}" },
         new[] { "金山詞霸中英字典", "https://www.iciba.com/word?w={0}" },
+        new[] { "林語堂當代漢英詞典", "https://humanum.arts.cuhk.edu.hk/cgi-bin/agrep-lindict?query={1}&category=full&boo=no&ignore=on&substr=on&order=all" },
         new[] { "劍橋英文字典", "https://dictionary.cambridge.org/search/direct/?datasetsearch=english-chinese-traditional&q={0}" },
         new[] { "牛津英文字典", "https://www.oxfordlearnersdictionaries.com/search/english/?q={0}" },
     };
@@ -250,6 +251,7 @@ internal static class QueryLinks
         new[] { "Facebook", "https://www.facebook.com/search/top/?q={0}" },
         new[] { "Youtube", "https://www.youtube.com/results?search_query={0}" },
         new[] { "拍賣", "https://www.carousell.com.hk/search/{0}" },
+        new[] { "生活易", "https://www.google.com/search?q=site%3Aesdlife.com+{0}" },   // 生活易冇公開搜尋網址
     };
 
     internal static string Url(string pattern, string text)
@@ -266,7 +268,7 @@ internal static class QueryLinks
 
     internal static string Translate(string text, bool simplified)
     {
-        return "https://translate.google.com/?sl=en&tl=" + (simplified ? "zh-CN" : "zh-TW") + "&text=" +
+        return "https://translate.google.com/?sl=auto&tl=" + (simplified ? "zh-CN" : "zh-TW") + "&text=" +
             Uri.EscapeDataString(text) + "&op=translate";
     }
 
