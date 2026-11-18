@@ -429,7 +429,7 @@ internal sealed class Q9Panel : Form
         if (engine.NoChar)
         {
             // 「未有字」：筆劃字形用補碼掣 (字形檢字 / 補音) 同三行提示；其他輸入法保留預設掣、冇提示 (原版截圖)
-            key0 = mode == Engine.Stroke && !engine.ExtraNoChar ? "選字" : "標點";   // 筆劃保留之前嘅碼，仲可以選字 (原版截圖 154)
+            key0 = mode == Engine.Stroke ? "選字" : "標點";   // 筆劃補形冇字亦顯示「選字」
             if (engine.ExtraNoChar) { lines = new[] { "沒有中文字供選用", "請輸入其他字", "其他版本可有多字" }; return; }   // 預設掣 (G892-0)
             if (mode == Engine.Stroke || mode == Engine.Glyph)
             {
@@ -1417,6 +1417,9 @@ internal static class Program
         Keys(engine, ".940"); Check(engine.Cand.Contains("入"), "筆劃 入");
         Keys(engine, ".7"); Check(engine.Image == "Q9STIM21.png" && engine.State == St.Compose, "筆劃第二碼底圖");
         Keys(engine, "b"); Check(engine.State == St.Idle && engine.Image == (engine.HasRelated ? "Q9STIM1.png" : "Q9STIM0.png"), "後退");
+        Keys(engine, "17-5"); Check(engine.NoChar && engine.Buf.Length == 0, "筆劃補形未有字");
+        Keys(engine, "b"); Check(engine.NoChar && engine.ExtraNoChar && engine.Buf.Length == 0, "筆劃補形未有字後退");
+        Keys(engine, ".");
         // 上屏後出關聯字，「0」選字
         Keys(engine, "710"); engine.Key((char)('1' + Array.IndexOf(engine.Cand, "志")));
         Check(sent.Last() == "志" && engine.State == St.Idle && engine.Kind == "rel" && engine.Cand.Count(c => c != null) == 9, "關聯字");
@@ -1458,6 +1461,8 @@ internal static class Program
         Keys(engine, ".");
         Keys(engine, "270"); Check(engine.Cand.Contains("九"), "字形 九");
         Keys(engine, ".892"); Check(engine.Cand[0] == "快", "字形 快");
+        Keys(engine, "-0"); Check(engine.NoChar && engine.Buf.Length == 0, "字形補形未有字");
+        Keys(engine, "b"); Check(engine.NoChar && engine.ExtraNoChar && engine.Buf.Length == 0, "字形補形未有字後退");
         Keys(engine, ".810"); Check(engine.Cand.Contains("中"), "字形 中");
         Keys(engine, ".");
         // 普通話拼音：雙 = pqrs u uang；時 = pqrs i 確定 第二聲；安 = 無聲母 a an；啊 = a 本身；( = 四角符號

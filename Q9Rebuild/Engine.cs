@@ -1121,6 +1121,7 @@ internal sealed class Engine
     // 鍵值：'0'-'9' '.' '+' '-' '\b'。回傳 false 表示引擎冇處理 (交返俾應用程式)。
     internal bool Key(char k)
     {
+        if (k == '\b' && NoChar && ExtraNoChar) return true;   // 補形／補音冇字時，原版退格會留喺同一畫面
         Note = "";
         bool wasNoChar = NoChar;
         NoChar = false; CantonNoCharZero = false; ExtraNoChar = false;
@@ -1237,8 +1238,12 @@ internal sealed class Engine
 
     private bool BackOne()
     {
-        Buf = Buf.Substring(0, Buf.Length - 1);
-        if (Buf.Length == 0) Reset(); else AfterEdit();
+        if (Buf.Length <= 1) Reset();
+        else
+        {
+            Buf = Buf.Substring(0, Buf.Length - 1);
+            AfterEdit();
+        }
         return true;
     }
 
@@ -1379,12 +1384,7 @@ internal sealed class Engine
         if (Mode == Canton) return CantonKey(k);
         if (k == '+') return true;   // 取碼時「+」原版冇反應 (原版截圖 G8+)
         if (k == '-') return OpenExtra(true);
-        if (k == '\b')
-        {
-            Buf = Buf.Substring(0, Buf.Length - 1);
-            if (Buf.Length == 0) Reset(); else AfterEdit();
-            return true;
-        }
+        if (k == '\b') return BackOne();
         // FUN_1800bf390：筆劃取碼時碼表冇條目，數字鍵先清碼；0 入標點頁，其他數字由呢一筆重新開始
         if (Mode == Stroke && k >= '0' && k <= '9' && !HasPreview)
         {
