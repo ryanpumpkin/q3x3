@@ -84,6 +84,21 @@ internal static class Dbcs
         }
     }
 
+    // 原版 MAPBU 資源：Big5 0x8840 起每行 158 格 (大端 UCS-2)，0 = 原版轉唔到 (畫唔到)
+    internal static byte[] MapBu;
+
+    // 原版畫唔到嘅 HKSCS 碼：0x81-0x87 首位元組、或者 MAPBU 係 0 (原版截圖：格有三角形但係空白)
+    internal static bool Hidden(int lang, byte b0, byte b1)
+    {
+        if (lang != 0 || MapBu == null || b0 < 0x81) return false;
+        if (b0 < 0x88) return true;
+        int code = b0 << 8 | b1;
+        if (!Hkscs.ContainsKey(code)) return false;
+        int col = b1 < 0x7F ? b1 - 0x40 : b1 - 0xA1 + 63;
+        int i = ((b0 - 0x88) * 158 + col) * 2;
+        return i >= 0 && i + 1 < MapBu.Length && MapBu[i] == 0 && MapBu[i + 1] == 0;
+    }
+
     internal static string Decode(int lang, byte b0, byte b1)
     {
         if (b0 < 0x80) return b0 < 0x20 ? "" : ((char)b0).ToString();
@@ -123,6 +138,7 @@ internal sealed class Tbl
     private readonly int n, elem;
     internal readonly int Type, Lang;
     internal const string Blank = "　";
+    internal const string Hidden = "​";   // 原版畫唔到嘅字：有格、冇字
 
     internal Tbl(byte[] data)
     {
@@ -176,6 +192,7 @@ internal sealed class Tbl
             byte b0 = d[p], b1 = d[p + 1];
             if (Type == 9 && b0 == 0x20 && b1 >= 0x20 && b1 < 0x40) list.Add(((char)(0xE000 + b1 - 0x20)).ToString());
             else if ((Lang == 0 && b0 == 0xA1 && b1 == 0x40) || (Lang == 1 && b0 == 0xA1 && b1 == 0xA1)) list.Add(Blank);
+            else if (Dbcs.Hidden(Lang, b0, b1)) list.Add(Hidden);
             else
             {
                 string s = Dbcs.Decode(Lang, b0, b1);
@@ -333,6 +350,8 @@ internal sealed class Q9Data
             if (BitConverter.ToString(sha.ComputeHash(image)).Replace("-", "") != DllHash)
                 throw new InvalidDataException("原裝 DLL 版本與已分析版本不符。");
         res = Pe.NamedResources(image);
+        byte[] mapBu;
+        if (res.TryGetValue("MAPBU", out mapBu)) Dbcs.MapBu = mapBu;
         LoadCanton(image);
         LoadExtraGroups(image);
     }
@@ -669,7 +688,11 @@ internal sealed class Engine
     internal string Last = "";                // 上一個上屏嘅字
     internal string Note = "";
     internal bool NoChar;                     // 「未有字」畫面
-    internal bool LookupSym;                  // 由檢字選單入嘅符號頁 (原版冇四角三角形、兩邊掣同檢字選單一樣)
+    internal bool LookupSym;
+    // 原版 FUN_1800ad920 睇「上一個候選字清單」停喺第幾頁：第一頁先顯示字形檢字掣／字形 0 嘅「檢字」標點頁
+    private int codePageOff;
+    internal bool CodePageFirst { get { return codePageOff == 0; } }
+    internal bool PunctCheck;                 // 字形冇關聯字時按 0 嘅標點頁 (0 = 檢字、兩行提示)                  // 由檢字選單入嘅符號頁 (原版冇四角三角形、兩邊掣同檢字選單一樣)
 
     // 資料視窗：上一個字嘅資料 (格式同原版 "筆劃﹕%s" 等)
     internal string[] InfoLines()
@@ -997,6 +1020,7 @@ internal sealed class Engine
 
     private void ShowPage()
     {
+        if (State == St.Select && Kind == "code") codePageOff = off;
         for (int i = 0; i < 9; i++) Cand[i] = null;
         int count = Math.Min(9, full.Count - off);
         for (int i = 0; i < count; i++)
@@ -1010,7 +1034,7 @@ internal sealed class Engine
 
     private void SetList(string kind, List<string> list, bool visualOrder)
     {
-        Kind = kind; full = list; off = 0; visual = visualOrder; LookupSym = false;
+        Kind = kind; full = list; off = 0; visual = visualOrder; LookupSym = false; PunctCheck = false;
         ShowPage();
     }
 
@@ -1072,8 +1096,16 @@ internal sealed class Engine
     internal bool Key(char k)
     {
         Note = "";
+        bool wasNoChar = NoChar;
         NoChar = false;
         if (Mode == Number) return false;
+        // 字形「未有字」之後原版已經清碼 (亦冇關聯字)：下一個鍵當靜止時處理，0 = 標點 (原版截圖 8250)
+        if (wasNoChar && Mode == Glyph && State == St.Compose && k != '' && k != '.')
+        {
+            Buf = ""; State = St.Idle;
+            SetList("code", new List<string>(), false);
+            return IdleKey(k);
+        }
         if (Kind == "emojicat" && (k == '\b' || k == '+' || k == '-' || k > '6')) return k != '\b';
         if (State == St.Select) return SelectKey(k);
         if (State == St.Idle) return IdleKey(k);
@@ -1099,7 +1131,13 @@ internal sealed class Engine
         }
         // 有關聯字時「0」係選字、「.」係標點；冇關聯字時「0」直接入標點 (FUN_1800af370 0x2e/0x30 互換)
         if (k == '0' && hasRel) { State = St.Select; return true; }
-        if (k == '0' || k == '.' && hasRel) { OpenPunct(); return true; }
+        if (k == '0' || k == '.' && hasRel)
+        {
+            OpenPunct();
+            // 字形冇關聯字、上一個清單喺第一頁：原版當字形碼「0」(FUN_1800b6380)，0 鍵係檢字 (原版截圖)
+            PunctCheck = k == '0' && !hasRel && Mode == Glyph && codePageOff == 0;
+            return true;
+        }
         if (k == '+') { phraseSuffixLength = 1; OpenPhrases(); return true; }
         if (k == '-') { OpenTexts("fav", Data.UserLines(Lang, "yourAlwaysUse.txt"), "未有自定常用字句"); return true; }
         return false;
@@ -1139,11 +1177,11 @@ internal sealed class Engine
         var list = Lookup();
         if (list.All(c => c == Tbl.Blank))
         {
-            Buf = save; Beep(); AfterEdit(); NoChar = true;
+            Buf = save; Beep(); AfterEdit(); NoChar = true; codePageOff = 0;
             return false;
         }
         SetList("code", list, false);
-        State = St.Select;
+        State = St.Select; codePageOff = 0;
         return true;
     }
 
@@ -1310,9 +1348,9 @@ internal sealed class Engine
             Buf += Mode == Stroke ? Swap(k) : k;
             if (Buf.Length < 3) { AfterEdit(); return true; }
             var list = Lookup();
-            if (list.Count == 0) { Buf = previous; Beep(); AfterEdit(); Note = "沒有這個碼"; return true; }
+            if (list.Count == 0) { Buf = previous; Beep(); AfterEdit(); NoChar = true; codePageOff = 0; return true; }   // 原版：「未有字」畫面 (原版截圖)
             SetList("code", list, false);
-            State = St.Select;
+            State = St.Select; codePageOff = 0;
             return true;
         }
         if (k == '0')
@@ -1320,7 +1358,7 @@ internal sealed class Engine
             var list = Lookup();
             if (list.All(c => c == Tbl.Blank)) { Beep(); Note = "沒有候選字"; return true; }
             SetList("code", list, false);
-            State = St.Select;
+            State = St.Select; codePageOff = 0;
             return true;
         }
         return true;
@@ -1339,13 +1377,13 @@ internal sealed class Engine
         }
         if ((Kind == "shape-extra" || Kind == "sound-extra") && k >= '0' && k <= '9')
             return FilterExtra(Kind == "shape-extra", k - '0');
-        if (Kind == "punct" && k == '0') { OpenSymbols(); return true; }
+        if (Kind == "punct" && k == '0') { if (PunctCheck) OpenLookupMenu(); else OpenSymbols(); return true; }
         if (Kind == "code" && (Mode == Glyph || Mode == Stroke) && (k == '+' || (k == '-' && off == 0)))
             return OpenExtra(k == '-');
         if (k >= '1' && k <= '9')
         {
             string s = Cand[k - '1'];
-            if (s == null) { Beep(); return true; }
+            if (s == null || s == Tbl.Hidden) { Beep(); return true; }
             if (Kind == "punct" && k == '9') { OpenLookupMenu(); return true; }
             if (Kind == "emojicat") { SetList("emoji", Data.Table(Lang, "EMOJIDATA").Get(k - '0'), false); return true; }
             Commit(s);

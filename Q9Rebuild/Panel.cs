@@ -428,8 +428,13 @@ internal sealed class Q9Panel : Form
         if (mode == Engine.Number) { key0 = "0"; dot = "."; lines = new[] { "請輸入數字" }; return; }
         if (engine.NoChar)
         {
-            key0 = "標點"; minus = "button10_pgup.png"; plus = "button11_pyExtra.png";
-            lines = new[] { "沒有中文字供選用", "請輸入其他字", "其他版本可有多字" };
+            // 「未有字」：筆劃字形用補碼掣 (字形檢字 / 補音) 同三行提示；其他輸入法保留預設掣、冇提示 (原版截圖)
+            key0 = "標點";
+            if (mode == Engine.Stroke || mode == Engine.Glyph)
+            {
+                minus = "button10_shapeExtra.png"; plus = "button11_pyExtra.png";
+                lines = new[] { "沒有中文字供選用", "請輸入其他字", "其他版本可有多字" };
+            }
             return;
         }
         if (engine.Kind == "emojicat") { key0 = "標點"; return; }
@@ -448,6 +453,12 @@ internal sealed class Q9Panel : Form
             }
             key0 = "下頁";
             // 標點頁 ('P' 一碼) 對原版係取碼狀態：筆劃字形顯示上頁 + 補音，其他輸入法顯示常用字句 + 詞語
+            if (engine.Kind == "punct" && engine.PunctCheck)
+            {
+                key0 = "檢字"; minus = "button10_shapeExtra.png"; plus = "button11_pyExtra.png";
+                lines = new[] { "選常用標點符號", "按省略號選其他" };   // FUN_1800b6380 碼「0」
+                return;
+            }
             if (engine.Kind == "punct")
             {
                 key0 = "下頁";     // FUN_1800b0970 'P'：0 鍵標籤「下　頁」(按 0 = 入 PUNDATA 第 9 組)
@@ -493,12 +504,12 @@ internal sealed class Q9Panel : Form
             switch (mode)
             {
                 case Engine.Glyph:
-                    minus = "button10_shapeExtra.png"; plus = "button11_pyExtra.png";
+                    minus = engine.CodePageFirst ? "button10_shapeExtra.png" : "button10_pgup.png"; plus = "button11_pyExtra.png";
                     if (n == 1) { key0 = "姓氏"; lines = new[] { "選部件", "按０選姓氏" }; }
                     else { key0 = "確定"; lines = new[] { "獨體字按０", "分體字選最右上之特徵" }; }
                     return;
                 case Engine.Stroke:
-                    minus = "button10_shapeExtra.png"; plus = "button11_pyExtra.png";
+                    minus = engine.CodePageFirst ? "button10_shapeExtra.png" : "button10_pgup.png"; plus = "button11_pyExtra.png";
                     // FUN_1800bf820：有預覽字就係「選字」+ 兩行提示 (唔理第幾碼)；冇預覽字就同靜止時一樣
                     if (engine.HasPreview)
                     {
