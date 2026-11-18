@@ -699,7 +699,8 @@ internal sealed class Engine
     internal string Last = "";                // 上一個上屏嘅字
     internal string Note = "";
     internal bool NoChar;                     // 「未有字」畫面
-    internal bool LookupSym;                  // 由檢字選單入嘅符號頁 (原版冇四角三角形、兩邊掣同檢字選單一樣)
+    internal bool LookupSym;
+    internal bool CantonNoCharZero;           // 粵拼「未有字」之後再撳 0                  // 由檢字選單入嘅符號頁 (原版冇四角三角形、兩邊掣同檢字選單一樣)
     // 原版 FUN_1800ad920 睇「上一個候選字清單」停喺第幾頁：第一頁先顯示字形檢字掣／字形 0 嘅「檢字」標點頁
     private int codePageOff;
     internal bool CodePageFirst { get { return codePageOff == 0; } }
@@ -1119,7 +1120,7 @@ internal sealed class Engine
     {
         Note = "";
         bool wasNoChar = NoChar;
-        NoChar = false;
+        NoChar = false; CantonNoCharZero = false;
         if (Mode == Number) return false;
         // 字形「未有字」之後原版已經清碼 (亦冇關聯字)：下一個鍵當靜止時處理，0 = 標點 (原版截圖 8250)
         if (wasNoChar && (Mode == Glyph || Mode == Pinyin || Mode == Zhuyin) && State == St.Compose && k != '' && k != '.')   // 拼音一樣 (原版截圖 6276)
@@ -1127,6 +1128,15 @@ internal sealed class Engine
             Buf = ""; State = St.Idle;
             SetList("code", new List<string>(), false);
             return IdleKey(k);
+        }
+        // 粵拼「未有字」：字母鍵由呢個字母重新開始，0 入標點
+        if (wasNoChar && Mode == Canton && State == St.Compose && k >= '0' && k <= '9')
+        {
+            // 0：原版停喺「未有字」，0 鍵變「選字」、三行提示 (原版截圖 C8280)
+            if (k == '0') { Beep(); NoChar = true; CantonNoCharZero = true; return true; }
+            if (k == '7') { Beep(); NoChar = true; return true; }
+            Buf = k + "1"; AfterEdit();
+            return true;
         }
         // 筆劃「未有字」：原版候選數係 0 (FUN_1800bf390 param_7)，數字鍵清碼，其他數字由呢一筆重新開始 (原版截圖 2431)；
         // 0 = 揀預設關聯字 (你這好到資就個能的)，入選字 (原版截圖 3580)
@@ -1351,7 +1361,8 @@ internal sealed class Engine
         if (k == '7') { Beep(); Note = "沒有這個拼音"; return true; }
         // FUN_1800b9320：碼表冇候選 (冇預覽字) 時，字母鍵先清碼，再由呢個字母重新開始
         if (k >= '1' && k <= '9' && !HasPreview) { Buf = k + "1"; AfterEdit(); return true; }
-        if (k < '1' || k > '9' || Data.CantonSpellings(keys + k).Count == 0) { Beep(); Note = "沒有這個拼音"; return true; }
+        // 冇呢個拼法：原版入「未有字」(冇預覽、0 鍵標點、資料區空白)，下一個鍵重新開始 (原版截圖 C11)
+        if (k < '1' || k > '9' || Data.CantonSpellings(keys + k).Count == 0) { Beep(); NoChar = true; return true; }
         Buf = keys + k + "1";
         if (Buf.Length == 7) Finish(Buf); else AfterEdit();
         return true;

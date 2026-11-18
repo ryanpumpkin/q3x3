@@ -440,6 +440,11 @@ internal sealed class Q9Panel : Form
                 lines = new[] { "沒有中文字供選用", "請輸入其他字", "其他版本可有多字" };   // 原版截圖 P24420、Z70
                 if (mode == Engine.Zhuyin) key0 = "韻母";   // 同注音靜止一樣
             }
+            else if (mode == Engine.Canton && engine.CantonNoCharZero)
+            {
+                key0 = "選字";
+                lines = new[] { "沒有中文字供選用", "請輸入其他字", "其他版本可有多字" };
+            }
             return;
         }
         if (engine.Kind == "emojicat") { key0 = "標點"; return; }
@@ -750,7 +755,7 @@ internal sealed class Q9Panel : Form
             RectangleF m = Px(skin.Area("MESSAGE_AREA"));
             if (paused) lines = new[] { "已暫停（按 Shift 恢復）" };
             else if (engine.Note.Length > 0) lines = new[] { engine.Note };
-            else if (engine.Mode == Engine.Canton && engine.State == St.Compose) { DrawCanton(g, hdc, face, m); lines = null; }
+            else if (engine.Mode == Engine.Canton && engine.State == St.Compose && !engine.NoChar) { DrawCanton(g, hdc, face, m); lines = null; }   // 「未有字」唔畫拼法清單
             if (lines != null)
                 for (int i = 0; i < lines.Length; i++)
                     Gdi.Text(hdc, lines[i], face, Pt(31) + 1, Color.White, (int)(m.X + 9 * s) + 1, (int)(m.Y + (64 + i * 57.5f) * s) + 1);
