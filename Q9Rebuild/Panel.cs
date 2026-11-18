@@ -435,7 +435,11 @@ internal sealed class Q9Panel : Form
                 minus = "button10_shapeExtra.png"; plus = "button11_pyExtra.png";
                 lines = new[] { "沒有中文字供選用", "請輸入其他字", "其他版本可有多字" };
             }
-            else if (mode == Engine.Pinyin) lines = new[] { "沒有中文字供選用", "請輸入其他字", "其他版本可有多字" };   // 原版截圖 P24420
+            else if (mode == Engine.Pinyin || mode == Engine.Zhuyin)
+            {
+                lines = new[] { "沒有中文字供選用", "請輸入其他字", "其他版本可有多字" };   // 原版截圖 P24420、Z70
+                if (mode == Engine.Zhuyin) key0 = "韻母";   // 同注音靜止一樣
+            }
             return;
         }
         if (engine.Kind == "emojicat") { key0 = "標點"; return; }

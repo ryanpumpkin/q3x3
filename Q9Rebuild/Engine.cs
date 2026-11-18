@@ -1122,7 +1122,7 @@ internal sealed class Engine
         NoChar = false;
         if (Mode == Number) return false;
         // 字形「未有字」之後原版已經清碼 (亦冇關聯字)：下一個鍵當靜止時處理，0 = 標點 (原版截圖 8250)
-        if (wasNoChar && (Mode == Glyph || Mode == Pinyin) && State == St.Compose && k != '' && k != '.')   // 拼音一樣 (原版截圖 6276)
+        if (wasNoChar && (Mode == Glyph || Mode == Pinyin || Mode == Zhuyin) && State == St.Compose && k != '' && k != '.')   // 拼音一樣 (原版截圖 6276)
         {
             Buf = ""; State = St.Idle;
             SetList("code", new List<string>(), false);
