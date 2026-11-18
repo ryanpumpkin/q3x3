@@ -454,6 +454,10 @@ internal sealed class Q9Panel : Form
                 if (extraButtons) { minus = "button10_pgup.png"; plus = "button11_pyExtra.png"; }
                 return;
             }
+            if (engine.Kind == "sym" && engine.LookupSym)
+            {
+                minus = "button10_pgup.png"; plus = "button11_blank.png"; lines = browse; return;
+            }
             if (engine.Kind == "sym")
             {
                 minus = "button10_pgup.png"; plus = extraButtons ? "button11_pyExtra.png" : "button11_nextpage.png";
@@ -615,7 +619,7 @@ internal sealed class Q9Panel : Form
                 RectangleF grid = new RectangleF(input.X, input.Y, input.Width, input.Width * 688f / 682f);
                 Draw(g, image, grid);
             }
-            if (select && !choosingMethod)
+            if (select && !choosingMethod && !engine.LookupSym)
             {
                 // FUN_1800b0580 / FUN_1800b55c0：每格四角三角形，格邊內縮 GridLine*，邊長 CornerSize，
                 // 用 GDI Polygon (NULL_PEN) 填 0xC0C0C1
@@ -721,7 +725,7 @@ internal sealed class Q9Panel : Form
             }
 
             // 檢字選單「+」掣：右邊「百家姓」「香港字」、左邊「拼音檢字」直排。原版字係縮放過 (模糊)，呢度只係位置對準 (大細 300 截圖量度，設計座標)
-            if (engine.Kind == "lookup-menu")
+            if (engine.Kind == "lookup-menu" || engine.LookupSym)
             {
                 string[] cols = { "百家姓", "香港字", "拼音檢字" };
                 float[][] at = { new[] { 589f, 497.5f }, new[] { 589f, 643.5f }, new[] { 545.5f, 569.5f } };

@@ -660,6 +660,7 @@ internal sealed class Engine
     internal string Last = "";                // 上一個上屏嘅字
     internal string Note = "";
     internal bool NoChar;                     // 「未有字」畫面
+    internal bool LookupSym;                  // 由檢字選單入嘅符號頁 (原版冇四角三角形、兩邊掣同檢字選單一樣)
 
     // 資料視窗：上一個字嘅資料 (格式同原版 "筆劃﹕%s" 等)
     internal string[] InfoLines()
@@ -1000,7 +1001,7 @@ internal sealed class Engine
 
     private void SetList(string kind, List<string> list, bool visualOrder)
     {
-        Kind = kind; full = list; off = 0; visual = visualOrder;
+        Kind = kind; full = list; off = 0; visual = visualOrder; LookupSym = false;
         ShowPage();
     }
 
@@ -1452,6 +1453,7 @@ internal sealed class Engine
     {
         var list = Data.Table(Lang, table).Get(row);
         OpenTexts(table == "SBDATA" ? "sym" : "lookup-result", list, "沒有中文字供選用");
+        LookupSym = table == "SBDATA" && State == St.Select;
         return true;
     }
 
