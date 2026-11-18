@@ -438,7 +438,7 @@ internal sealed class Q9Panel : Form
         bool extraButtons = mode == Engine.Stroke || mode == Engine.Glyph;
         if (select)
         {
-            if (engine.Kind == "lookup-menu") { minus = "button10_pgup.png"; plus = "button11_blank.png"; lines = new[] { "選檢字方法" }; return; }
+            if (engine.Kind == "lookup-menu") { minus = "button10_pgup.png"; plus = "button11_pyExtra.png"; lines = new[] { "選檢字方法" }; return; }
             // 補碼第一步：字形 ('E') 兩邊都係空白掣，補音 ('e') 左邊係上頁
             if (engine.Kind == "shape-extra") { minus = "button10_blank.png"; plus = "button11_blank.png"; lines = new[] { "選字形結構" }; return; }
             if (engine.Kind == "sound-extra")
@@ -456,7 +456,7 @@ internal sealed class Q9Panel : Form
             }
             if (engine.Kind == "sym" && engine.LookupSym)
             {
-                minus = "button10_pgup.png"; plus = "button11_blank.png"; lines = browse; return;
+                minus = "button10_pgup.png"; plus = "button11_pyExtra.png"; lines = browse; return;
             }
             if (engine.Kind == "sym")
             {
@@ -722,16 +722,6 @@ internal sealed class Q9Panel : Form
                 if (engine.Mode == Engine.Number) Gdi.Fill(hdc, Fill, DotBox.X, DotBox.Y, DotBox.Width, DotBox.Height);
                 int dx = engine.Mode == Engine.Number ? -6 : 0, dy = engine.Mode == Engine.Number ? -2 : 0;   // 原版截圖 (大細 300)
                 Gdi.Text(hdc, dot, face, big, Color.Black, (int)(DotKey.X + adjH * s) + dx, baseY + dy);
-            }
-
-            // 檢字選單「+」掣：右邊「百家姓」「香港字」、左邊「拼音檢字」直排。原版字係縮放過 (模糊)，呢度只係位置對準 (大細 300 截圖量度，設計座標)
-            if (engine.Kind == "lookup-menu" || engine.LookupSym)
-            {
-                string[] cols = { "百家姓", "香港字", "拼音檢字" };
-                float[][] at = { new[] { 589f, 497.5f }, new[] { 589f, 643.5f }, new[] { 545.5f, 569.5f } };
-                for (int c = 0; c < 3; c++)
-                    for (int i = 0; i < cols[c].Length; i++)
-                        Gdi.Text(hdc, cols[c][i].ToString(), face, Pt(31) + 1, Color.FromArgb(32, 32, 32), (int)(at[c][0] * s), (int)((at[c][1] + i * 36.5f) * s));
             }
 
             // 資料視窗：14px 細明體點陣字，白色
