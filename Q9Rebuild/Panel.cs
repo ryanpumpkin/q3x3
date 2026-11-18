@@ -18,7 +18,7 @@ internal sealed class Settings
     {
         { "Mode", 1 }, { "Lang", 0 }, { "Convert", 0 }, { "Size", 300 }, { "Opacity", 100 }, { "KeyMode", 0 },
         { "RelMode", 2 }, { "Ver", 0 }, { "DirectTopLeft", 1 }, { "HalfPunct", 0 }, { "Radical", 0 }, { "History", 0 }, { "UpdateOrder", 1 },
-        { "Top", 0 }, { "ShiftToggle", 1 }, { "ModeNumber", 1 }, { "ModeEmoji", 1 }, { "NumFormat", 0 },
+        { "Top", 0 }, { "ShiftToggle", 1 }, { "ModeNumber", 1 }, { "ModeEmoji", 1 }, { "NumFormat", 0 }, { "ShowInfo", 1 },
         { "On1", 1 }, { "On2", 1 }, { "On3", 1 }, { "On4", 1 }, { "On5", 1 }
     };
 
@@ -231,10 +231,23 @@ internal sealed class Q9Panel : Form
         int size = settings["Size"];
         skin = new Skin(data.Files, size);
         int width = size - 1;                                   // 原版 300 設定實際係 299×481
-        Image bg = skin.Get("q9.png");
+        Image bg = Background;
         ClientSize = new Size(width, (int)Math.Round(width * (double)bg.Height / bg.Width));
         Dock_(settings["Top"] != 0);
         Opacity = hovering ? 1.0 : settings["Opacity"] / 100.0;
+        Invalidate();
+    }
+
+    // 資料視窗可以收起 (原版 q9bigwinShowInfo)：收起時用 q9noInfo.png，底部掣變 Button16 (MESSAGE_AREA_SHOW)。
+    private bool InfoShown { get { return settings["ShowInfo"] != 0 || skin.Get("q9noInfo.png") == null; } }
+    private Image Background { get { return InfoShown ? skin.Get("q9.png") : skin.Get("q9noInfo.png"); } }
+
+    private void ToggleInfo()
+    {
+        settings["ShowInfo"] = InfoShown ? 0 : 1;
+        Image bg = Background;
+        ClientSize = new Size(ClientSize.Width, (int)Math.Round(ClientSize.Width * (double)bg.Height / bg.Width));
+        if (frame != null) { frame.Dispose(); frame = null; }
         Invalidate();
     }
 
@@ -631,10 +644,25 @@ internal sealed class Q9Panel : Form
             if (frame != null) frame.Dispose();
             frame = new Gdi.Surface(Math.Max(1, ClientSize.Width), Math.Max(1, ClientSize.Height));
         }
+        // While the 詞語 / 自定常用 window is open the original panel keeps its previous (idle) picture
+        // instead of drawing the phrases into its own cells.
+        if (!Capture_ && engine.TextList && restingFrame != null && restingFrame.Size == ClientSize)
+        {
+            e.Graphics.DrawImageUnscaled(restingFrame, 0, 0);
+            UpdatePhraseWindow();
+            return;
+        }
         using (Graphics fg = Graphics.FromImage(frame.Bitmap)) PaintFrame(fg, frame.Dc);
         e.Graphics.DrawImageUnscaled(frame.Bitmap, 0, 0);
+        if (!Capture_ && !engine.TextList)
+        {
+            if (restingFrame != null) restingFrame.Dispose();
+            restingFrame = new Bitmap(frame.Bitmap);
+        }
         if (!Capture_) UpdatePhraseWindow();
     }
+
+    private Bitmap restingFrame;
 
     private void PaintFrame(Graphics g, IntPtr textDc)
     {
@@ -644,7 +672,7 @@ internal sealed class Q9Panel : Form
         // 原版視窗用 color key 0xC0C0C0 (SetLayeredWindowAttributes …, 3)：先填 key 色，
         // 皮膚圖半透明嘅邊會混灰色，完全透明嘅位就變透明
         g.Clear(ColorKey);
-        var skinImage = (Bitmap)skin.Get("q9.png");
+        var skinImage = (Bitmap)Background;
         if (!(skinImage.Width == ClientSize.Width && skinImage.Height == ClientSize.Height && frame != null
               && BlendExact(g, frame.Bitmap, skinImage, 0, 0)))
             g.DrawImage(skinImage, 0, 0, ClientSize.Width, ClientSize.Height);
@@ -714,8 +742,9 @@ internal sealed class Q9Panel : Form
         Draw(g, "Button09Transparent.png", input);
         if (dot == "取消" && !useButton09) g.DrawImage(CancelText, input);
 
-        // 資料視窗下面嘅收起掣
-        Draw(g, "Button17.png", Px(skin.Area("MESSAGE_AREA_HIDE")));
+        // 資料視窗下面嘅收起掣；收起咗就喺格仔下面畫展開掣
+        if (InfoShown) Draw(g, "Button17.png", Px(skin.Area("MESSAGE_AREA_HIDE")));
+        else Draw(g, "Button16.png", Px(skin.Area("MESSAGE_AREA_SHOW")));
 
         // 文字：用 GDI (同原版一樣 TextOutW + 基線對齊)
         g.Flush(System.Drawing.Drawing2D.FlushIntention.Sync);
@@ -807,7 +836,9 @@ internal sealed class Q9Panel : Form
             RectangleF m = Px(skin.Area("MESSAGE_AREA"));
             if (paused) lines = new[] { "已暫停（按 Shift 恢復）" };
             else if (engine.Note.Length > 0) lines = new[] { engine.Note };
-            else if (engine.Mode == Engine.Canton && engine.State == St.Compose && !engine.NoChar) { DrawCanton(hdc, face, m); lines = null; }   // 「未有字」唔畫拼法清單
+            else if (InfoShown && engine.Mode == Engine.Canton && engine.State == St.Compose && !engine.NoChar) { DrawCanton(hdc, face, m); lines = null; }   // 「未有字」唔畫拼法清單
+            infoLines = lines ?? new string[0];
+            if (!InfoShown) lines = null;
             if (lines != null)
                 for (int i = 0; i < lines.Length; i++)
                     Gdi.Text(hdc, lines[i], face, Pt(31) + 1, Color.White, (int)(m.X + 9 * s) + 1, (int)(m.Y + (64 + i * 57.5f) * s) + 1);
@@ -1056,13 +1087,14 @@ internal sealed class Q9Panel : Form
 
     protected override void OnMouseLeave(EventArgs e)
     {
-        if (queryTipShown) { queryTipShown = false; queryTip.Hide(this); }
+        if (tipShown != null) { tipShown = null; if (tip != null) tip.Hide(this); }
         hovering = false; Opacity = settings["Opacity"] / 100.0;
         base.OnMouseLeave(e);
     }
 
     private static readonly string[] Buttons = { "TITLE_BUT", "CUR_IM_BUT", "BACKSPACE_BUT", "ENTER_BUT", "SPACE_BUT",
-        "NEXT_IM_BUT", "SWITCH_WIN_BUT", "HELP_BUT", "Q9_INPUT_AREA", "MINUS_BUT", "PLUS_BUT", "PRE_PAGE_BUT", "NEXT_PAGE_BUT" };
+        "NEXT_IM_BUT", "SWITCH_WIN_BUT", "HELP_BUT", "Q9_INPUT_AREA", "MINUS_BUT", "PLUS_BUT", "PRE_PAGE_BUT", "NEXT_PAGE_BUT",
+        "MESSAGE_AREA_HIDE", "MESSAGE_AREA_SHOW" };
 
     protected override void OnMouseDown(MouseEventArgs e)
     {
@@ -1074,9 +1106,61 @@ internal sealed class Q9Panel : Form
         }
     }
 
+    // Tooltips as in the original: blue text on white with a thin border. The 查 button shows its
+    // description; pointing at the info area repeats its lines.
     private const string QueryTipText = "反向查字(查詢：資料、發音、近音、漢語字典、漢英字典、詞庫及中英文地址轉換)";
-    private readonly ToolTip queryTip = new ToolTip();
-    private bool queryTipShown;
+    private ToolTip tip;
+    private string tipShown;
+    private string[] infoLines = new string[0];
+    private Font tipFont;
+
+    private ToolTip Tip
+    {
+        get
+        {
+            if (tip != null) return tip;
+            tipFont = new Font(engine.Lang == 0 ? "MingLiU_HKSCS" : "SimSun", 12f, GraphicsUnit.Pixel);
+            tip = new ToolTip { OwnerDraw = true };
+            tip.Popup += delegate(object sender, PopupEventArgs e)
+            {
+                Size text = TextRenderer.MeasureText(tipShown ?? "", tipFont);
+                e.ToolTipSize = new Size(text.Width + 8, text.Height + 4);
+            };
+            tip.Draw += delegate(object sender, DrawToolTipEventArgs e)
+            {
+                e.Graphics.FillRectangle(Brushes.White, e.Bounds);
+                e.Graphics.DrawRectangle(Pens.DimGray, new Rectangle(0, 0, e.Bounds.Width - 1, e.Bounds.Height - 1));
+                TextRenderer.DrawText(e.Graphics, e.ToolTipText, tipFont, new Rectangle(4, 2, e.Bounds.Width - 6, e.Bounds.Height - 3),
+                    Color.Blue, TextFormatFlags.Left | TextFormatFlags.Top | TextFormatFlags.NoPadding);
+            };
+            return tip;
+        }
+    }
+
+    private void UpdateTip(PointF p, Point at)
+    {
+        string text = null;
+        if (!dragging && Px(skin.Area("HELP_BUT")).Contains(p)) text = QueryTipText;
+        else if (!dragging && InfoShown && Px(skin.Area("MESSAGE_AREA")).Contains(p) && infoLines.Length > 0)
+            text = string.Join("\n", infoLines);
+        if (text == tipShown) return;
+        tipShown = text;
+        if (text == null) { if (tip != null) tip.Hide(this); return; }
+        // Keep it on screen: the panel usually sits at the bottom, so go above the cursor when
+        // there is no room below (and left when there is no room on the right).
+        ToolTip t = Tip;
+        Size size = TextRenderer.MeasureText(text, tipFont);
+        size = new Size(size.Width + 8, size.Height + 4);
+        Rectangle area = Screen.FromControl(this).WorkingArea;
+        Point screen = PointToScreen(at);
+        int x = screen.X + 12, y = screen.Y + 20;
+        if (y + size.Height > area.Bottom) y = screen.Y - size.Height - 4;
+        if (x + size.Width > area.Right) x = area.Right - size.Width;
+        x = Math.Max(area.Left, x);
+        y = Math.Max(area.Top, y);
+        Point client = PointToClient(new Point(x, y));
+        t.Show(text, this, client.X, client.Y, 5000);
+    }
 
     protected override void OnMouseMove(MouseEventArgs e)
     {
@@ -1085,14 +1169,7 @@ internal sealed class Q9Panel : Form
         PointF p = Unit(e.Location);
         Cursor want = dragging || !Buttons.Any(name => Px(skin.Area(name)).Contains(p)) ? Cursors.SizeAll : Cursors.Default;
         if (Cursor != want) Cursor = want;
-        // 查 button tooltip, worded as in the original.
-        bool overQuery = !dragging && Px(skin.Area("HELP_BUT")).Contains(p);
-        if (overQuery != queryTipShown)
-        {
-            queryTipShown = overQuery;
-            if (overQuery) queryTip.Show(QueryTipText, this, e.X + 12, e.Y + 20, 5000);
-            else queryTip.Hide(this);
-        }
+        UpdateTip(p, e.Location);
         if (!dragging) return;
         Point screen = PointToScreen(e.Location);
         Location = new Point(screen.X - dragOrigin.X, screen.Y - dragOrigin.Y);
@@ -1128,8 +1205,9 @@ internal sealed class Q9Panel : Form
         else if (hit("SPACE_BUT")) Native.Tap(0x20);
         else if (hit("MINUS_BUT")) engine.Key('-');
         else if (hit("PLUS_BUT")) engine.Key('+');
-        else if (hit("PRE_PAGE_BUT")) { settings["Top"] = 1; Dock_(true); }
-        else if (hit("NEXT_PAGE_BUT")) { settings["Top"] = 0; Dock_(false); }
+        else if (InfoShown ? hit("MESSAGE_AREA_HIDE") : hit("MESSAGE_AREA_SHOW")) ToggleInfo();
+        else if (InfoShown && hit("PRE_PAGE_BUT")) { settings["Top"] = 1; Dock_(true); }
+        else if (InfoShown && hit("NEXT_PAGE_BUT")) { settings["Top"] = 0; Dock_(false); }
         else if (ZeroKey.Contains(p)) engine.Key('0');
         else if (DotKey.Contains(p)) engine.Key('.');
         else
@@ -1511,7 +1589,7 @@ internal sealed class Q9Panel : Form
                 delegate { Edit(engine.Kind == "fav" ? "yourAlwaysUse.txt" : "Q9PHRASE.TXT"); });
             phraseWindowSize = size;
         }
-        phraseWindow.Text = engine.Kind == "fav" ? "自設常用字句 / 符號" : "詞語／自定短句";
+        phraseWindow.Text = engine.Kind == "fav" ? "自設常用字句 / 符號" : "詞語 / 自定短句";   // 原版字串 (DLL .data)
         var area = Screen.FromRectangle(Bounds).WorkingArea;
         int x = Left - phraseWindow.Width;
         if (x < area.Left) x = Right;
@@ -1805,7 +1883,7 @@ internal sealed class PhraseWindow : Form
         this.engine = engine;
         this.press = press;
         this.edit = edit;
-        Text = "詞語／自定短句";
+        Text = "詞語 / 自定短句";
         AutoScaleMode = AutoScaleMode.None;
         FormBorderStyle = FormBorderStyle.None;
         ShowInTaskbar = false;
@@ -1856,18 +1934,22 @@ internal sealed class PhraseWindow : Form
                         TextFormatFlags.VerticalCenter | TextFormatFlags.HorizontalCenter);
             }
         }
+        // FUN_180017670: each phrase starts at its cell's top-left corner, font size =
+        // title size × 9 / (DBCS byte length), at most 60, and 14 when that comes out under 10.
+        float titleSize = 17f * Height / DesignHeight;
+        var dbcs = System.Text.Encoding.GetEncoding(engine.Lang == 0 ? 950 : 936);
         for (int i = 0; i < engine.Cand.Length; i++)
         {
             Rectangle bounds = Scale(Cell(i));
             if (background == null) e.Graphics.FillRectangle(Brushes.WhiteSmoke, bounds);
             string phrase = engine.Cand[i];
             if (phrase == null) continue;
-            bounds.Inflate(-Math.Max(2, Width * 5 / DesignWidth), 0);
-            int count = Engine.Elements(phrase).Count;
-            float fontSize = Math.Min(bounds.Height * 0.74f, (float)bounds.Width / Math.Max(3, count));
-            using (var font = new Font(face, Math.Max(8f, fontSize), GraphicsUnit.Pixel))
+            int bytes = Math.Max(1, dbcs.GetByteCount(phrase));
+            float fontSize = Math.Min(60f * Height / DesignHeight, titleSize * 9f / bytes);
+            if (fontSize < 10f * Height / DesignHeight) fontSize = 14f * Height / DesignHeight;
+            using (var font = new Font(face, Math.Max(6f, fontSize), GraphicsUnit.Pixel))
                 TextRenderer.DrawText(e.Graphics, phrase, font, bounds, Color.Black, TextFormatFlags.Left |
-                    TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPadding);
+                    TextFormatFlags.Top | TextFormatFlags.SingleLine | TextFormatFlags.NoPadding);
         }
         if (!engine.Cand.Any(c => c != null))
             using (var font = new Font(face, Math.Max(10f, 25f * Height / DesignHeight), GraphicsUnit.Pixel))
