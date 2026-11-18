@@ -37,6 +37,35 @@ public interface ITfDocumentMgr
 public interface ITfContext
 {
     [PreserveSig] int RequestEditSession(uint clientId, ITfEditSession session, uint flags, out int sessionResult);
+    [PreserveSig] int InWriteSession(uint clientId, [MarshalAs(UnmanagedType.Bool)] out bool writing);
+    [PreserveSig] int GetSelection(uint cookie, uint index, uint count, IntPtr selections, out uint fetched);
+    [PreserveSig] int SetSelection(uint cookie, uint count, ref TfSelection selection);
+}
+
+[StructLayout(LayoutKind.Sequential)]
+public struct TfSelection
+{
+    public IntPtr Range;        // ITfRange*
+    public int ActiveEnd;       // TF_AE_NONE
+    public int InterimChar;
+}
+
+[ComImport, Guid("aa80e7ff-2021-11d2-93e0-0060b067b86e"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+internal interface ITfRange
+{
+    [PreserveSig] int GetText();
+    [PreserveSig] int SetText();
+    [PreserveSig] int GetFormattedText();
+    [PreserveSig] int GetEmbedded();
+    [PreserveSig] int InsertEmbedded();
+    [PreserveSig] int ShiftStart();
+    [PreserveSig] int ShiftEnd();
+    [PreserveSig] int ShiftStartToRange();
+    [PreserveSig] int ShiftEndToRange();
+    [PreserveSig] int ShiftStartRegion();
+    [PreserveSig] int ShiftEndRegion();
+    [PreserveSig] int IsEmpty();
+    [PreserveSig] int Collapse(uint cookie, int anchor);
 }
 
 [ComImport, Guid("aa80e803-2021-11d2-93e0-0060b067b86e"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
@@ -48,7 +77,7 @@ public interface ITfEditSession
 [ComImport, Guid("55ce16ba-3014-41c1-9ceb-fade1446ac6c"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
 internal interface ITfInsertAtSelection
 {
-    [PreserveSig] int InsertTextAtSelection(uint cookie, uint flags, [MarshalAs(UnmanagedType.LPWStr)] string text, int length, IntPtr range);
+    [PreserveSig] int InsertTextAtSelection(uint cookie, uint flags, [MarshalAs(UnmanagedType.LPWStr)] string text, int length, out ITfRange range);
 }
 
 [ComImport, Guid("aa80e7f0-2021-11d2-93e0-0060b067b86e"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
@@ -114,10 +143,12 @@ public sealed class TsfInput : ITfTextInputProcessor, ITfKeyEventSink, ITfThread
             focusAdvised = true;
             Marshal.ThrowExceptionForHR(keys.AdviseKeyEventSink(clientId, this, true));
             keyAdvised = true;
+            TsfProtocol.Log("activate ok");
             return 0;
         }
         catch (Exception ex)
         {
+            TsfProtocol.Log("activate failed " + ex);
             Deactivate();
             return Marshal.GetHRForException(ex);
         }
@@ -129,6 +160,7 @@ public sealed class TsfInput : ITfTextInputProcessor, ITfKeyEventSink, ITfThread
         if (keyAdvised) keys.UnadviseKeyEventSink(clientId);
         if (focusAdvised) source.UnadviseSink(focusCookie);
         keyAdvised = focusAdvised = selected = false;
+        pending.Length = 0;
         StopRetry();
         nextLaunch = DateTime.MinValue;
         if (target != null) target.DestroyHandle();
@@ -143,6 +175,7 @@ public sealed class TsfInput : ITfTextInputProcessor, ITfKeyEventSink, ITfThread
     public int OnSetFocus(bool foreground)
     {
         selected = foreground;
+        TsfProtocol.Log("OnSetFocus " + foreground);
         return foreground ? OnSetThreadFocus() : OnKillThreadFocus();
     }
 
@@ -212,7 +245,9 @@ public sealed class TsfInput : ITfTextInputProcessor, ITfKeyEventSink, ITfThread
         if (target == null || !selected || !TsfProtocol.IsForeground(target.Handle)) return false;
         EnsureHost();
         string payload = new string(new[] { (char)key.ToInt64(), (char)((flags.ToInt64() >> 24) & 1) });
-        return Notify(command, payload);
+        bool eaten = Notify(command, payload);
+        TsfProtocol.Log(command + " vk=" + key.ToInt64().ToString("X") + " eaten=" + eaten);
+        return eaten;
     }
 
     public int OnTestKeyDown(ITfContext context, IntPtr key, IntPtr flags, out bool eaten)
@@ -235,6 +270,7 @@ public sealed class TsfInput : ITfTextInputProcessor, ITfKeyEventSink, ITfThread
         keyOutput = output;
         try { eaten = Key(TsfMessage.Down, key, flags); }
         finally { keyOutput = null; }
+        if (output.Length != 0) TsfProtocol.Log("keydown output [" + output + "] eaten=" + eaten);
         if (eaten && output.Length != 0 && !Insert(context, output.ToString()))
             Notify(TsfMessage.CommitFailed);
         return 0;
@@ -254,25 +290,50 @@ public sealed class TsfInput : ITfTextInputProcessor, ITfKeyEventSink, ITfThread
 
     private bool Receive(string text)
     {
+        TsfProtocol.Log("receive [" + text + "] selected=" + selected + " fg=" + TsfProtocol.IsForeground(target.Handle) +
+            " inKey=" + (keyOutput != null));
         if (!selected || !TsfProtocol.IsForeground(target.Handle)) return false;
         if (keyOutput != null)
         {
             keyOutput.Append(text);
             return true;
         }
-        ITfDocumentMgr document;
-        ITfContext context;
-        return manager.GetFocus(out document) >= 0 && document != null &&
-            document.GetTop(out context) >= 0 && context != null && Insert(context, text);
+        // Outside a key event this runs inside the host's cross-thread SendMessage. Editing the
+        // document there re-enters the application's text store, so queue it for the message loop.
+        bool first = pending.Length == 0;
+        pending.Append(text);
+        if (first) PostMessage(target.Handle, FlushMessage, IntPtr.Zero, IntPtr.Zero);
+        return true;
     }
 
-    private bool Insert(ITfContext context, string text)
+    internal const int FlushMessage = 0x8000 + 0x51;   // WM_APP + 0x51
+    private readonly StringBuilder pending = new StringBuilder();
+
+    [DllImport("user32.dll")]
+    private static extern bool PostMessage(IntPtr window, int message, IntPtr wParam, IntPtr lParam);
+
+    private void FlushPending()
     {
-        const uint readWrite = 0x6;
+        string text = pending.ToString();
+        pending.Length = 0;
+        if (text.Length == 0 || manager == null) return;
+        ITfDocumentMgr document;
+        ITfContext context;
+        bool ok = manager.GetFocus(out document) >= 0 && document != null &&
+            document.GetTop(out context) >= 0 && context != null && Insert(context, text, true);
+        if (!ok) Notify(TsfMessage.CommitFailed);
+    }
+
+    private bool Insert(ITfContext context, string text, bool async = false)
+    {
+        // TF_ES_READWRITE, plus TF_ES_ASYNC when not inside a TSF key callback.
+        uint flags = async ? 0xEu : 0x6u;
         int result;
         var session = new InsertSession(context, text);
-        bool accepted = context.RequestEditSession(clientId, session, readWrite, out result) >= 0 && result >= 0;
-        if (accepted) session.Failed = delegate { if (target != null) Notify(TsfMessage.CommitFailed); };
+        session.Failed = delegate { if (target != null) Notify(TsfMessage.CommitFailed); };
+        int hr = context.RequestEditSession(clientId, session, flags, out result);
+        bool accepted = hr >= 0 && result >= 0;
+        TsfProtocol.Log("RequestEditSession async=" + async + " hr=" + hr.ToString("X") + " result=" + result.ToString("X"));
         return accepted;
     }
 
@@ -285,10 +346,27 @@ public sealed class TsfInput : ITfTextInputProcessor, ITfKeyEventSink, ITfThread
         internal InsertSession(ITfContext context, string text) { this.context = context; this.text = text; }
         public int DoEditSession(uint cookie)
         {
-            const uint noQuery = 0x1;
+            // Flag 0, as in the Windows SDK samples: TF_IAS_NOQUERY leaves TSF without a range for the
+            // inserted text and crashes TextInputFramework.dll when it reports the change.
             var insert = context as ITfInsertAtSelection;
+            ITfRange range = null;
             int hr = insert == null ? unchecked((int)0x80004002) :
-                insert.InsertTextAtSelection(cookie, noQuery, text, text.Length, IntPtr.Zero);
+                insert.InsertTextAtSelection(cookie, 0, text, text.Length, out range);
+            int selectHr = 0;
+            if (hr >= 0 && range != null)
+            {
+                // Put the caret after the inserted text.
+                range.Collapse(cookie, 1);   // TF_ANCHOR_END
+                IntPtr pointer = Marshal.GetComInterfaceForObject(range, typeof(ITfRange));
+                try
+                {
+                    var selection = new TfSelection { Range = pointer };
+                    selectHr = context.SetSelection(cookie, 1, ref selection);
+                }
+                finally { Marshal.Release(pointer); }
+            }
+            if (range != null) Marshal.ReleaseComObject(range);
+            TsfProtocol.Log("InsertTextAtSelection [" + text + "] hr=" + hr.ToString("X") + " select=" + selectHr.ToString("X"));
             if (hr < 0 && Failed != null) Failed();
             return hr;
         }
@@ -305,6 +383,11 @@ public sealed class TsfInput : ITfTextInputProcessor, ITfKeyEventSink, ITfThread
 
         protected override void WndProc(ref Message message)
         {
+            if (message.Msg == FlushMessage)
+            {
+                owner.FlushPending();
+                return;
+            }
             TsfMessage command;
             string payload;
             if (TsfProtocol.Read(message, out command, out payload) &&

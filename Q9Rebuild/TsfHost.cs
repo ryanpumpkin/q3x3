@@ -79,6 +79,8 @@ internal sealed class TsfHost : NativeWindow, IDisposable
 
     private void Commit(string text)
     {
+        TsfProtocol.Log("host commit [" + text + "] client=" + (client != IntPtr.Zero) + " blurred=" + blurred +
+            " editorFg=" + (TsfProtocol.Foreground == editor));
         if (client != IntPtr.Zero && !blurred && TsfProtocol.Foreground == editor)
         {
             SendText(text);
@@ -104,8 +106,9 @@ internal sealed class TsfHost : NativeWindow, IDisposable
 
     private void SendText(string text)
     {
-        if (!TsfProtocol.Send(client, Handle, TsfMessage.Commit, text))
-            panel.ReportTsfDeliveryFailure();
+        bool sent = TsfProtocol.Send(client, Handle, TsfMessage.Commit, text);
+        TsfProtocol.Log("host send [" + text + "] -> " + sent);
+        if (!sent) panel.ReportTsfDeliveryFailure();
     }
 
     protected override void WndProc(ref Message message)
@@ -119,6 +122,8 @@ internal sealed class TsfHost : NativeWindow, IDisposable
         }
         message.Result = IntPtr.Zero;
         var sender = message.WParam;
+        if (command != TsfMessage.TestUp && command != TsfMessage.Up)
+            TsfProtocol.Log("host got " + command + " fg=" + TsfProtocol.IsForeground(sender) + " isClient=" + (sender == client));
         if (command == TsfMessage.Blur)
         {
             if (sender == client) blurred = true;

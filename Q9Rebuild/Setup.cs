@@ -67,7 +67,8 @@ internal static class Registration
                     key.SetValue("Class", "TsfInput");
                     key.SetValue("Assembly", AssemblyName.GetAssemblyName(dll).FullName);
                     key.SetValue("RuntimeVersion", "v4.0.30319");
-                    key.SetValue("CodeBase", new Uri(dll).AbsoluteUri);
+                    // Same form as RegAsm /codebase. The CLR does not decode %20, so Uri.AbsoluteUri breaks "Program Files".
+                    key.SetValue("CodeBase", "file:///" + dll.Replace('\\', '/'));
                 }
             }
 

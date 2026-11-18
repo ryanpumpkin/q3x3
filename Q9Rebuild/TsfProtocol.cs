@@ -28,6 +28,20 @@ internal static class TsfProtocol
     [DllImport("user32.dll")]
     private static extern IntPtr GetForegroundWindow();
 
+    // Diagnostic trace: written only while %LOCALAPPDATA%\Q9Rebuild\tsf-debug.log already exists.
+    private static readonly string LogPath = System.IO.Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), @"Q9Rebuild\tsf-debug.log");
+    internal static void Log(string line)
+    {
+        try
+        {
+            if (!System.IO.File.Exists(LogPath)) return;
+            System.IO.File.AppendAllText(LogPath, DateTime.Now.ToString("HH:mm:ss.fff ") +
+                System.Diagnostics.Process.GetCurrentProcess().ProcessName + " " + line + Environment.NewLine);
+        }
+        catch (Exception) { }
+    }
+
     internal static IntPtr FindHost() { return FindWindowEx(MessageOnly, IntPtr.Zero, null, HostName); }
     internal static IntPtr Foreground { get { return GetForegroundWindow(); } }
 
