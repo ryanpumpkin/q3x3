@@ -708,7 +708,7 @@ internal sealed class Engine
     internal bool CodePageFirst { get { return codePageOff == 0; } }
     internal bool PunctCheck;                 // 字形冇關聯字時按 0 嘅標點頁 (0 = 檢字、兩行提示)
     // 拼音四角符號 (碼 0x00) 清單：原版冇選字三角形 (原版截圖 P13)
-    internal bool SymbolCode { get { return Kind == "code" && Mode == Pinyin && Buf.Length > 0 && Buf[0] == '0'; } }
+    internal bool SymbolCode { get { return Kind == "code" && (Mode == Pinyin || Mode == Glyph) && Buf.Length > 0 && Buf[0] == '0'; } }
 
     // 資料視窗：上一個字嘅資料 (格式同原版 "筆劃﹕%s" 等)
     internal string[] InfoLines()
@@ -859,7 +859,8 @@ internal sealed class Engine
     {
         if (Buf.Length == 0) return 0;
         // 字形表：一碼 a → a0，兩碼 ab → ab0，三碼 abc；筆劃表：直接以內部碼作索引 (FUN_1800c0070)
-        if (Mode == Glyph) return int.Parse(Buf.Length < 3 ? Buf + "0" : Buf);
+        // 字形「0」開頭 (標點符號) 直接用個數：「09」= 碼 9 (原版截圖 G21109)
+        if (Mode == Glyph) return int.Parse(Buf.Length < 3 && Buf[0] != '0' ? Buf + "0" : Buf);
         if (Mode == Pinyin) return Phonetic(Buf, PyInitial, PyFinal, 41);
         if (Mode == Zhuyin) return Phonetic(Buf, ZyInitial, ZyFinal, 30);
         if (Mode == Canton) return Data.CantonCode(int.Parse(Buf));
@@ -1435,6 +1436,14 @@ internal sealed class Engine
         {
             string s = Cand[k - '1'];
             if (s == null || s == Tbl.Hidden) { Beep(); return true; }
+            if (Kind == "punct" && k == '9' && PunctCheck)
+            {
+                // 「檢字」款 = 字形碼「0」：9 鍵 (其他) 入字形碼「09」符號清單 (原版截圖 G21109)
+                Buf = "09";
+                SetList("code", Main.Get(Code()), false);
+                State = St.Select; codePageOff = 0;
+                return true;
+            }
             if (Kind == "punct" && k == '9') { OpenLookupMenu(); return true; }
             if (Kind == "emojicat") { SetList("emoji", Data.Table(Lang, "EMOJIDATA").Get(k - '0'), false); return true; }
             Commit(s);
@@ -1533,12 +1542,8 @@ internal sealed class Engine
             var strokes = Enumerable.Range(1, 26).Select(n => n.ToString()).Concat(new[] { ">27" }).ToList();
             OpenTexts("stroke-count", strokes, "未有筆劃數目");
         }
-        else if (key == 2)
-        {
-            int original = Mode;
-            SetMode(Pinyin);
-            previousLookupMode = original;
-        }
+        // 「音」：原版喺檢字選單揀咗只係返去靜止頁，唔轉拼音 (原版截圖 G1..92、G1..928)
+        else if (key == 2) Reset();
         else if (key == 3)
         {
             // 九方部首筆劃檢字：先揀部首第一筆 (畫面同字形靜止一樣，FUN_1800b0970)
@@ -1704,6 +1709,8 @@ internal sealed class Engine
             var e = Elements(s);
             Last = e.Count > 0 ? e[e.Count - 1] : "";
         }
+        // 標點、符號：原版都當係上一個字 (資料區空白、關聯字用預設字唔對調) (原版截圖 G21101)
+        else if ((Kind == "punct" || Kind == "sym") && Elements(s).Count == 1) Last = s;
         bool emoji = Kind == "emoji";
         Reset();
         if (emoji || Mode == Emoji) OpenEmoji();

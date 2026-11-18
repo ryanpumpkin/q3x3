@@ -636,7 +636,7 @@ internal sealed class Q9Panel : Form
             for (int key = 1; key <= 9; key++)
             {
                 // PY0 / PYREL / PYNONE 本身已經畫咗 7 鍵灰格 (有圓角)，唔使另外填
-                bool blank = select && engine.Kind != "radical-stroke" && engine.Kind != "sound-extra" && engine.Cand[key - 1] == null || PinyinDisabled(key);
+                bool blank = select && engine.Kind != "radical-stroke" && engine.Kind != "sound-extra" && !engine.LookupSym && engine.Cand[key - 1] == null || PinyinDisabled(key);
                 if (blank) g.FillRectangle(empty, GrayCell(key));
             }
             if (image != null)
@@ -689,12 +689,12 @@ internal sealed class Q9Panel : Form
                     RectangleF r = Cell(key);
                     // 半形字當半格計：「()」用全大字 (原版截圖)，「其他」先縮細
                     var parts = Engine.Elements(t);
-                    int len = (int)Math.Ceiling(parts.Sum(p => p.Length == 1 && p[0] < 0x100 ? 0.5 : 1.0));
+                    int len = (int)Math.Ceiling(parts.Sum(p => p.Length == 1 && p[0] < 0x80 ? 0.5 : 1.0));   // 只有 ASCII 算半形 (÷ 係 Big5 全形)
                     int size = len <= 1 ? big : Math.Max(Pt(28), big * 2 / (len + 1));
                     Color color = Extended(t) && engine.Kind != "radical-count" ? Color.Red : Color.Black;   // 部首頁原版一律黑色
                     int x = (int)r.X + (int)(adjH * s);
                     // 全部半形 (數字、筆劃數目等)：一兩隻字喺全形位靠右；三隻 (「>27」) 用全大字喺格入面置中 (原版截圖)
-                    bool allHalf = t.Length > 0 && t.All(ch => ch < 0x100);
+                    bool allHalf = t.Length > 0 && t.All(ch => ch < 0x80);
                     if (allHalf && t.Length <= 2) x += (2 - t.Length) * big / 2;
                     else if (allHalf && t.Length == 3) { size = big; x = (int)r.X + (CellPx - 3 * big / 2) / 2 + 2; }
                     // 部首第 0x51 個 (阝 右耳) 原版向右移半個字 (FUN_1800b0970)
