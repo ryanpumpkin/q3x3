@@ -1106,6 +1106,21 @@ internal sealed class Engine
             SetList("code", new List<string>(), false);
             return IdleKey(k);
         }
+        // 筆劃「未有字」：原版候選數係 0 (FUN_1800bf390 param_7)，數字鍵清碼，其他數字由呢一筆重新開始 (原版截圖 2431)；
+        // 0 = 揀預設關聯字 (你這好到資就個能的)，入選字 (原版截圖 3580)
+        if (wasNoChar && Mode == Stroke && State == St.Compose && k >= '0' && k <= '9')
+        {
+            Buf = "";
+            if (k == '0')
+            {
+                SetList("rel", Elements(DefaultRel[Lang]), false);
+                State = St.Select;
+                return true;
+            }
+            Buf = Swap(k).ToString();
+            AfterEdit();
+            return true;
+        }
         if (Kind == "emojicat" && (k == '\b' || k == '+' || k == '-' || k > '6')) return k != '\b';
         if (State == St.Select) return SelectKey(k);
         if (State == St.Idle) return IdleKey(k);

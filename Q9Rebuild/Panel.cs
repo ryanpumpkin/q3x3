@@ -429,7 +429,7 @@ internal sealed class Q9Panel : Form
         if (engine.NoChar)
         {
             // 「未有字」：筆劃字形用補碼掣 (字形檢字 / 補音) 同三行提示；其他輸入法保留預設掣、冇提示 (原版截圖)
-            key0 = "標點";
+            key0 = mode == Engine.Stroke ? "選字" : "標點";   // 筆劃保留之前嘅碼，仲可以選字 (原版截圖 154)
             if (mode == Engine.Stroke || mode == Engine.Glyph)
             {
                 minus = "button10_shapeExtra.png"; plus = "button11_pyExtra.png";
@@ -689,7 +689,7 @@ internal sealed class Q9Panel : Form
                     Gdi.Text(hdc, t, emojiList ? "Segoe UI Emoji" : face, size, color, x, (int)r.Y + (int)(adjV * s));
                 }
             }
-            else if (engine.Kind == "rel" || engine.Kind == "code" || engine.Kind == "pyhint")
+            else if ((engine.Kind == "rel" || engine.Kind == "code" || engine.Kind == "pyhint") && !engine.NoChar)   // 「未有字」唔畫預覽
             {
                 Color color = engine.Kind == "rel" ? RelColor : PreviewColor;
                 for (int key = 1; key <= 9; key++)
@@ -700,7 +700,7 @@ internal sealed class Q9Panel : Form
                     if (engine.Kind == "pyhint")
                         Gdi.Text(hdc, t, face, big, Color.Black, (int)r.X + (int)(adjH * s), (int)r.Y + (int)(adjV * s));
                     else
-                        Gdi.Text(hdc, t, face, rel, Extended(t) ? Color.Red : color,
+                        Gdi.Text(hdc, t, face, rel, Extended(t) && engine.Kind == "rel" ? Color.Red : color,   // 預覽字原版一律 0xd52880
                             (int)r.X + (int)(skin.Value("UI.TopLeftTextAdjustH", 3) * s) + 1, (int)r.Y + (int)(skin.Value("UI.TopLeftTextAdjustV", 69) * s) + 1);   // 關聯字、預覽字同一位置 (原版截圖)
                 }
             }
