@@ -465,7 +465,7 @@ internal sealed class Q9Panel : Form
             }
             if (engine.Kind == "stroke-count" || engine.Kind == "radical-count" || engine.Kind == "lookup-result")
             {
-                minus = "button10_pgup.png"; plus = "button11_nextpage.png";
+                minus = "button10_pgup.png"; plus = "button11_pyExtra.png";   // 檢字子頁同檢字選單一樣 (原版截圖)
                 lines = engine.Kind == "stroke-count" ? new[] { "選筆劃數目" }
                     : engine.Kind == "radical-count" ? new[] { "選部首" } : browse;
                 return;
@@ -667,9 +667,12 @@ internal sealed class Q9Panel : Form
                     int len = (int)Math.Ceiling(parts.Sum(p => p.Length == 1 && p[0] < 0x100 ? 0.5 : 1.0));
                     int size = len <= 1 ? big : Math.Max(Pt(28), big * 2 / (len + 1));
                     Color color = Extended(t) ? Color.Red : Color.Black;
-                    // 數字模式：半形數字向右移半個字闊 (原版截圖)
-                    int numShift = engine.Mode == Engine.Number ? big / 2 : 0;
-                    Gdi.Text(hdc, t, emojiList ? "Segoe UI Emoji" : face, size, color, (int)r.X + (int)(adjH * s) + numShift, (int)r.Y + (int)(adjV * s));
+                    int x = (int)r.X + (int)(adjH * s);
+                    // 全部半形 (數字、筆劃數目等)：一兩隻字喺全形位靠右；三隻 (「>27」) 用全大字喺格入面置中 (原版截圖)
+                    bool allHalf = t.Length > 0 && t.All(ch => ch < 0x100);
+                    if (allHalf && t.Length <= 2) x += (2 - t.Length) * big / 2;
+                    else if (allHalf && t.Length == 3) { size = big; x = (int)r.X + (CellPx - 3 * big / 2) / 2 + 2; }
+                    Gdi.Text(hdc, t, emojiList ? "Segoe UI Emoji" : face, size, color, x, (int)r.Y + (int)(adjV * s));
                 }
             }
             else if (engine.Kind == "rel" || engine.Kind == "code" || engine.Kind == "pyhint")
