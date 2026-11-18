@@ -53,7 +53,8 @@ public struct TfSelection
 [ComImport, Guid("aa80e7ff-2021-11d2-93e0-0060b067b86e"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
 internal interface ITfRange
 {
-    [PreserveSig] int GetText();
+    [PreserveSig] int GetText(uint cookie, uint flags, [Out, MarshalAs(UnmanagedType.LPArray, SizeParamIndex = 3)] char[] text,
+        uint max, out uint fetched);
     [PreserveSig] int SetText();
     [PreserveSig] int GetFormattedText();
     [PreserveSig] int GetEmbedded();
@@ -421,6 +422,62 @@ public sealed class TsfInput : ITfTextInputProcessor, ITfKeyEventSink, ITfThread
         return accepted;
     }
 
+    // 查: read the application's selected text and hand it to the host (Selection message).
+    // The read happens in an asynchronous edit session queued from here, so it never runs inside
+    // the host's cross-thread SendMessage.
+    private bool ReadSelection()
+    {
+        if (manager == null || target == null) return false;
+        ITfDocumentMgr document;
+        ITfContext context;
+        if (manager.GetFocus(out document) < 0 || document == null || document.GetTop(out context) < 0 || context == null)
+            return false;
+        int result;
+        var session = new SelectionSession(context, delegate(string text) { if (target != null) Notify(TsfMessage.Selection, text); });
+        int hr = context.RequestEditSession(clientId, session, 0x2 | 0x8, out result);   // TF_ES_READ | TF_ES_ASYNC
+        return hr >= 0 && result >= 0;
+    }
+
+    [ComVisible(true), ClassInterface(ClassInterfaceType.None)]
+    private sealed class SelectionSession : ITfEditSession
+    {
+        private readonly ITfContext context;
+        private readonly Action<string> done;
+        internal SelectionSession(ITfContext context, Action<string> done) { this.context = context; this.done = done; }
+
+        public int DoEditSession(uint cookie)
+        {
+            string text = "";
+            IntPtr buffer = Marshal.AllocHGlobal(Marshal.SizeOf(typeof(TfSelection)));
+            try
+            {
+                uint fetched;
+                // TF_DEFAULT_SELECTION, one selection
+                if (context.GetSelection(cookie, 0xFFFFFFFF, 1, buffer, out fetched) >= 0 && fetched == 1)
+                {
+                    IntPtr pointer = Marshal.ReadIntPtr(buffer);
+                    if (pointer != IntPtr.Zero)
+                    {
+                        try
+                        {
+                            var range = (ITfRange)Marshal.GetObjectForIUnknown(pointer);
+                            var chars = new char[512];
+                            uint count;
+                            if (range.GetText(cookie, 0, chars, (uint)chars.Length, out count) >= 0)
+                                text = new string(chars, 0, (int)Math.Min(count, (uint)chars.Length));
+                            Marshal.ReleaseComObject(range);
+                        }
+                        finally { Marshal.Release(pointer); }
+                    }
+                }
+            }
+            catch (Exception ex) { TsfProtocol.Log("selection failed " + ex.Message); }
+            finally { Marshal.FreeHGlobal(buffer); }
+            done(text);
+            return 0;
+        }
+    }
+
     [ComVisible(true), ClassInterface(ClassInterfaceType.None)]
     private sealed class InsertSession : ITfEditSession
     {
@@ -481,6 +538,11 @@ public sealed class TsfInput : ITfTextInputProcessor, ITfKeyEventSink, ITfThread
                 {
                     message.Result = owner.selected && TsfProtocol.IsForeground(Handle) && owner.HasDocumentFocus()
                         ? (IntPtr)1 : IntPtr.Zero;
+                    return;
+                }
+                if (command == TsfMessage.QuerySelection)
+                {
+                    message.Result = owner.ReadSelection() ? (IntPtr)1 : IntPtr.Zero;
                     return;
                 }
                 if (command == TsfMessage.Mode)

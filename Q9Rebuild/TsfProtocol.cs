@@ -3,7 +3,9 @@ using System.Runtime.InteropServices;
 using System.Windows.Forms;
 
 // ToggleMode: TSF → host (the 中/英 button was clicked). Mode: host → TSF, payload "zh" or "en".
-internal enum TsfMessage { Focus = 1, Blur, TestDown, TestUp, Down, Up, Commit, Ping, CommitFailed, Log, ToggleMode, Mode }
+// QuerySelection: host → TSF (the 查 button needs the selected text). Selection: TSF → host, payload = text.
+internal enum TsfMessage { Focus = 1, Blur, TestDown, TestUp, Down, Up, Commit, Ping, CommitFailed, Log, ToggleMode, Mode,
+    QuerySelection, Selection }
 
 internal static class TsfProtocol
 {

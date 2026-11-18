@@ -18,7 +18,7 @@ internal sealed class Settings
     {
         { "Mode", 1 }, { "Lang", 0 }, { "Convert", 0 }, { "Size", 300 }, { "Opacity", 100 }, { "KeyMode", 0 },
         { "RelMode", 2 }, { "Ver", 0 }, { "DirectTopLeft", 1 }, { "HalfPunct", 0 }, { "Radical", 0 }, { "History", 0 }, { "UpdateOrder", 1 },
-        { "Top", 0 }, { "ShiftToggle", 1 }, { "ModeNumber", 1 }, { "ModeEmoji", 1 },
+        { "Top", 0 }, { "ShiftToggle", 1 }, { "ModeNumber", 1 }, { "ModeEmoji", 1 }, { "NumFormat", 0 },
         { "On1", 1 }, { "On2", 1 }, { "On3", 1 }, { "On4", 1 }, { "On5", 1 }
     };
 
@@ -850,6 +850,8 @@ internal sealed class Q9Panel : Form
             File.AppendAllText(Path.Combine(dir, DateTime.Now.ToString("yyyy-MM-dd") + ".txt"), text, Encoding.UTF8);
         }
         if (Capture_) return;
+        // Typing with 九方 while the 拼音檢字 window has focus goes into its input box.
+        if (pinyinLookup != null && pinyinLookup.ContainsFocus) { pinyinLookup.InsertText(text); return; }
         if (TextSink != null) { TextSink(text); return; }
         if (IsHandleCreated) BeginInvoke(new Action(() => Native.Type(text))); else Native.Type(text);
     }
@@ -972,7 +974,6 @@ internal sealed class Q9Panel : Form
 
     private char AvailableKey(int vk, int flags)
     {
-        if (pinyinLookup != null && pinyinLookup.ContainsFocus) return '\0';
         bool modifier = Native.Down(0x11) || Native.Down(0x12) || Native.Down(0x5B) || Native.Down(0x5C);
         return paused || modifier || Native.Down(0x10) && settings["KeyMode"] >= 2 ? '\0' : MapKey(vk, flags);
     }
@@ -1217,6 +1218,13 @@ internal sealed class Q9Panel : Form
             if (i == 1) Item(related, "編輯自定關聯字…", false, delegate { Edit("Q9UserRelChar.TXT"); });
         }
         Toggle(root, "點擊左上角的字直接上字", "DirectTopLeft", null);
+        // 數字對譯形式 (older 九方 versions): format used by 查 → 數字對譯
+        var numbers = Item(root, "數字對譯形式", false, null).DropDownItems;
+        for (int i = 0; i < NumberWords.FormatNames.Length; i++)
+        {
+            int value = i;
+            Item(numbers, NumberWords.FormatNames[i], settings["NumFormat"] == value, delegate { settings["NumFormat"] = value; });
+        }
         Toggle(root, "輸出半形常用符號", "HalfPunct", delegate { engine.HalfPunct = settings["HalfPunct"] != 0; });
         root.Add(new ToolStripSeparator());
         Item(root, "編輯詞語／自定短句…", false, delegate { Edit("Q9PHRASE.TXT"); });
@@ -1232,14 +1240,165 @@ internal sealed class Q9Panel : Form
         ShowMenu(at);
     }
 
+    // TSF host: reads the application's selection through TSF (null = no answer).
+    internal Action<Action<string>> SelectionRequest;
+
     private void OpenQuery(Point at)
     {
         IntPtr target = Native.GetForegroundWindow();
+        if (SelectionRequest != null && IsHandleCreated)
+            SelectionRequest(delegate(string text)
+            {
+                BeginInvoke(new Action(delegate { ShowQuery(at, text ?? CopySelection(), target); }));
+            });
+        else ShowQuery(at, CopySelection(), target);
+    }
+
+    // Floating panel (and TSF fallback): Ctrl+C in the application, read the text, then put the
+    // previous clipboard contents back.
+    private string CopySelection()
+    {
+        if (Capture_) return "";
+        var backup = new DataObject();
+        bool hadData = false;
+        try
+        {
+            IDataObject saved = Clipboard.GetDataObject();
+            if (saved != null)
+                foreach (string format in saved.GetFormats(false))
+                {
+                    try { object value = saved.GetData(format, false); if (value != null) { backup.SetData(format, false, value); hadData = true; } }
+                    catch (Exception) { }
+                }
+        }
+        catch (ExternalException) { }
+        uint before = Native.GetClipboardSequenceNumber();
+        Native.Copy();
+        for (int i = 0; i < 25 && Native.GetClipboardSequenceNumber() == before; i++) System.Threading.Thread.Sleep(20);
+        if (Native.GetClipboardSequenceNumber() == before) return "";
+        string text = "";
+        try { text = Clipboard.GetText(TextDataFormat.UnicodeText); }
+        catch (ExternalException) { }
+        try { if (hadData) Clipboard.SetDataObject(backup, true); else Clipboard.Clear(); }
+        catch (ExternalException) { }
+        return text;
+    }
+
+    private void ShowQuery(Point at, string selected, IntPtr target)
+    {
+        string text = (selected ?? "").Trim();
+        if (text.Length > 200) text = text.Substring(0, 200);
         menu.Items.Clear();
+        if (text.Length > 0) AddQueryItems(text, target);
         Item(menu.Items, "拼音檢字", false, delegate { OpenPinyinLookup("", false, target); });
         Item(menu.Items, "九方說明", false, OpenHelp);
         Item(menu.Items, "開啟自定資料夾", false, delegate { Directory.CreateDirectory(data.UserDir); Process.Start(data.UserDir); });
         ShowMenu(at);
+    }
+
+    private void Open(string url)
+    {
+        try { Process.Start(url); }
+        catch (System.ComponentModel.Win32Exception) { }
+    }
+
+    private void AddQueryItems(string text, IntPtr target)
+    {
+        var elements = Engine.Elements(text);
+        string shown = elements.Count > 12 ? string.Concat(elements.Take(12)) + "…" : text;
+        menu.Items.Add(new ToolStripLabel("查詢：" + shown.Replace('\r', ' ').Replace('\n', ' ')));
+        menu.Items.Add(new ToolStripSeparator());
+
+        // 字典
+        menu.Items.Add(new ToolStripLabel("中文字典"));
+        if (data.Files.Exists(@"chdict\chdict.exe"))
+            Item(menu.Items, "- 九方漢語字典", false, delegate
+            {
+                string path = data.Files.FilePath(@"chdict\chdict.exe");
+                Process.Start(new ProcessStartInfo(path, "\"" + text + "\"") { WorkingDirectory = Path.GetDirectoryName(path) });
+            });
+        foreach (string[] link in QueryLinks.ChineseDictionaries)
+        {
+            string url = QueryLinks.Url(link[1], text);
+            Item(menu.Items, "- " + link[0], false, delegate { Open(url); });
+        }
+        menu.Items.Add(new ToolStripLabel("英文字典"));
+        foreach (string[] link in QueryLinks.EnglishDictionaries)
+        {
+            string url = QueryLinks.Url(link[1], text);
+            Item(menu.Items, "- " + link[0], false, delegate { Open(url); });
+        }
+        menu.Items.Add(new ToolStripSeparator());
+
+        // 見字查字：選取一個中文字時用同選字格四角一樣嘅功能
+        bool single = elements.Count == 1 && elements[0].Length > 0 && (elements[0][0] >= 0x2E80 || char.IsSurrogate(elements[0][0]));
+        string character = single ? elements[0] : null;
+        Item(menu.Items, "粵語發音", false, delegate { SpeakCharacter(character, true); }).Enabled = single;
+        Item(menu.Items, "普通話發音", false, delegate { SpeakCharacter(character, false); }).Enabled = single;
+        var info = Item(menu.Items, "資料.發音.近音", false, null);
+        if (single)
+        {
+            foreach (string line in engine.InfoLines(character)) info.DropDownItems.Add(new ToolStripLabel(line));
+            string[] fields = data.Info(engine.Lang, character);
+            string reading = fields != null && fields.Length > 3 ? fields[3].Split(',', '/', ';')[0] : "";
+            if (reading.Length > 0)
+            {
+                if (info.DropDownItems.Count > 0) info.DropDownItems.Add(new ToolStripSeparator());
+                Item(info.DropDownItems, "近音", false, delegate { OpenPinyinLookup(reading, false, target); });
+            }
+        }
+        info.Enabled = info.DropDownItems.Count > 0;
+        Item(menu.Items, "詞庫功能", false, delegate { engine.StartPhrases(text, false); })
+            .Enabled = elements.Count >= 1 && elements.Count <= 8 && elements.All(e => e.Length > 0 && (e[0] >= 0x2E80 || char.IsSurrogate(e[0])));
+        Item(menu.Items, "部首筆劃查字", false, delegate { engine.ShowLookupMethods(); });
+
+        // 對譯同地址：數字對譯會取代選取咗嘅文字
+        int format = Math.Max(0, Math.Min(3, settings["NumFormat"]));
+        string number = NumberWords.Convert(text, format, engine.Lang == 1);
+        Item(menu.Items, "數字對譯", false, delegate { Deliver(number); }).Enabled = number != null;
+        bool latin = text.Any(c => c < 0x80 && char.IsLetter(c));
+        Item(menu.Items, "英文對譯中文", false, delegate { Open(QueryLinks.Translate(text, engine.Lang == 1)); }).Enabled = latin;
+        Item(menu.Items, "中英文地址 - 互查", false, delegate { LookupAddress(text, target); });
+        menu.Items.Add(new ToolStripSeparator());
+
+        foreach (string[] link in QueryLinks.Searches)
+        {
+            string url = QueryLinks.Url(link[1], text);
+            Item(menu.Items, link[0], false, delegate { Open(url); });
+        }
+        menu.Items.Add(new ToolStripSeparator());
+    }
+
+    // 中英文地址互查：香港政府地址查詢服務，結果可以輸入中文或英文地址，或者開 Google 地圖
+    private void LookupAddress(string query, IntPtr target)
+    {
+        Point at = PointToClient(Cursor.Position);
+        System.Threading.ThreadPool.QueueUserWorkItem(delegate
+        {
+            List<AddressMatch> matches = null;
+            string error = null;
+            try { matches = AddressLookup.Find(query); }
+            catch (Exception ex) { error = ex.Message; }
+            if (!IsHandleCreated) return;
+            BeginInvoke(new Action(delegate
+            {
+                menu.Items.Clear();
+                menu.Items.Add(new ToolStripLabel("中英文地址 - 互查：" + query));
+                menu.Items.Add(new ToolStripSeparator());
+                if (error != null) menu.Items.Add(new ToolStripLabel("查詢失敗：" + error));
+                else if (matches.Count == 0) menu.Items.Add(new ToolStripLabel("搵唔到相符嘅地址"));
+                else
+                    foreach (AddressMatch match in matches)
+                    {
+                        AddressMatch m = match;
+                        var entry = Item(menu.Items, m.Chinese.Length > 0 ? m.Chinese : m.English, false, null);
+                        if (m.Chinese.Length > 0) Item(entry.DropDownItems, "輸入中文：" + m.Chinese, false, delegate { Deliver(m.Chinese); });
+                        if (m.English.Length > 0) Item(entry.DropDownItems, "輸入英文：" + m.English, false, delegate { Deliver(m.English); });
+                        Item(entry.DropDownItems, "Google 地圖", false, delegate { Open(QueryLinks.Map(m)); });
+                    }
+                ShowMenu(at);
+            }));
+        });
     }
 
     private void OpenHelp()
@@ -1430,14 +1589,26 @@ internal sealed class Q9Panel : Form
 
     private void OpenPinyinLookup(string query, bool cantonese, IntPtr target = default(IntPtr))
     {
+        // Opened from a menu item: let the menu finish closing first, or its keyboard capture keeps
+        // swallowing what is typed into the lookup window (same thread).
+        if (menu.Visible || menuWatch.Enabled)
+        {
+            menu.Close();
+            menuWatch.Stop();
+            BeginInvoke(new Action(delegate { OpenPinyinLookup(query, cantonese, target); }));
+            return;
+        }
         if (pinyinLookup != null)
         {
-            pinyinLookup.Activate();
+            BringToFront(pinyinLookup);
             return;
         }
         if (target == IntPtr.Zero) target = Native.GetForegroundWindow();
         int language = engine.Lang;
-        var lookup = new PinyinLookupWindow(query, cantonese, language, data);
+        var lookup = new PinyinLookupWindow(query, cantonese, language, data,
+            // TSF mode: the input method is not active inside the host's own windows, so pass the
+            // window's keys to the panel here (the floating panel's keyboard hook already sees them).
+            hook == IntPtr.Zero ? new Func<int, int, bool, bool>(ProcessVirtualKey) : null);
         pinyinLookup = lookup;
         lookup.FormClosed += delegate
         {
@@ -1452,6 +1623,17 @@ internal sealed class Q9Panel : Form
             }
         };
         lookup.Show();
+        BringToFront(lookup);
+    }
+
+    // The panel never takes activation, so Windows will not hand keyboard focus to a window it opens.
+    // Attach to the foreground thread to activate it, then put the cursor in its input box.
+    private static void BringToFront(Form window)
+    {
+        Native.Activate(window.Handle);
+        window.Activate();
+        var lookupWindow = window as PinyinLookupWindow;
+        if (lookupWindow != null) lookupWindow.FocusQuery();
     }
 
     private void SpeakCharacter(string character, bool cantonese)
@@ -1692,10 +1874,17 @@ internal sealed class PinyinLookupWindow : Form
     private readonly int language;
     internal string SelectedCharacter { get; private set; }
 
-    internal PinyinLookupWindow(string initialQuery, bool cantonese, int language, Q9Data data)
+    internal PinyinLookupWindow(string initialQuery, bool cantonese, int language, Q9Data data,
+        Func<int, int, bool, bool> panelKey = null)
     {
         this.data = data;
         this.language = language;
+        if (panelKey != null)
+        {
+            KeyPreview = true;
+            KeyDown += delegate(object sender, KeyEventArgs e) { PanelKey(panelKey, e, true); };
+            KeyUp += delegate(object sender, KeyEventArgs e) { PanelKey(panelKey, e, false); };
+        }
         Text = "拼音檢字";
         StartPosition = FormStartPosition.CenterScreen;
         FormBorderStyle = FormBorderStyle.SizableToolWindow;
@@ -1744,8 +1933,30 @@ internal sealed class PinyinLookupWindow : Form
         layout.Controls.Add(buttons, 0, 2);
         AcceptButton = search;
         CancelButton = cancel;
-        Shown += delegate { query.Focus(); query.SelectAll(); };
+        Shown += delegate { FocusQuery(); };
         if (initialQuery.Length > 0) Search();
+    }
+
+    internal void FocusQuery()
+    {
+        query.Focus();
+        query.SelectAll();
+    }
+
+    // Text typed with 九方 into this window.
+    internal void InsertText(string text)
+    {
+        if (!query.Focused) query.Focus();
+        query.SelectedText = text;
+    }
+
+    // Numpad keys drive the 九方 panel; letters, Enter and editing keys stay with the window.
+    private static void PanelKey(Func<int, int, bool, bool> panelKey, KeyEventArgs e, bool down)
+    {
+        int vk = (int)e.KeyCode;
+        bool numpad = vk >= 0x60 && vk <= 0x6F;   // VK_NUMPAD0 … VK_DIVIDE
+        if (!numpad || e.Control || e.Alt) return;
+        if (panelKey(vk, 0, down)) e.Handled = e.SuppressKeyPress = true;
     }
 
     private void Search()
@@ -1754,7 +1965,15 @@ internal sealed class PinyinLookupWindow : Form
         try
         {
             characters.Items.Clear();
-            string[] found = data.FindPinyin(language, query.Text, dialect.SelectedIndex == 1).ToArray();
+            string text = query.Text.Trim();
+            // A Chinese character typed with 九方: search by its Mandarin reading (same-sound characters).
+            string ch = Engine.Elements(text).FirstOrDefault(e => e.Length > 0 && (e[0] >= 0x2E80 || char.IsSurrogate(e[0])));
+            if (ch != null && dialect.SelectedIndex == 0)
+            {
+                string[] fields = data.Info(language, ch);
+                text = fields != null && fields.Length > 3 ? fields[3].Split(',', '/', ';')[0] : "";
+            }
+            string[] found = data.FindPinyin(language, text, dialect.SelectedIndex == 1).ToArray();
             characters.Items.AddRange(found);
             status.Text = found.Length == 0 ? "未有字" : found.Length + " 字";
             if (found.Length > 0) characters.SelectedIndex = 0;
@@ -2011,6 +2230,20 @@ internal static class Native
         inputs[1].Data.Keyboard = new Keyboard { Key = key, Flags = 2 };
         SendInput(2, inputs, Marshal.SizeOf(typeof(Input)));
     }
+
+    // Ctrl+C in the foreground application.
+    internal static void Copy()
+    {
+        var inputs = new Input[4];
+        for (int i = 0; i < 4; i++) inputs[i].Type = 1;
+        inputs[0].Data.Keyboard = new Keyboard { Key = 0x11 };
+        inputs[1].Data.Keyboard = new Keyboard { Key = 0x43 };
+        inputs[2].Data.Keyboard = new Keyboard { Key = 0x43, Flags = 2 };
+        inputs[3].Data.Keyboard = new Keyboard { Key = 0x11, Flags = 2 };
+        SendInput(4, inputs, Marshal.SizeOf(typeof(Input)));
+    }
+
+    [DllImport("user32.dll")] internal static extern uint GetClipboardSequenceNumber();
 }
 
 internal static class Program
@@ -2030,6 +2263,17 @@ internal static class Program
         engine.Output = sent.Add;
         engine.RelMode = 0;
         engine.UpdateOrder = false;      // 唔好俾調前改咗後面測試用嘅次序
+        // 數字對譯 (說明書例子：123 → ONE HUNDRED AND TWENTY-THREE)
+        Check(NumberWords.Convert("123", 0, false) == "ONE HUNDRED AND TWENTY-THREE", "數字對譯英文");
+        Check(NumberWords.Convert("1005", 0, false) == "ONE THOUSAND AND FIVE", "數字對譯英文 AND");
+        Check(NumberWords.Convert("2,000,017", 0, false) == "TWO MILLION AND SEVENTEEN", "數字對譯英文百萬");
+        Check(NumberWords.Convert("3.14", 0, false) == "THREE POINT ONE FOUR", "數字對譯英文小數");
+        Check(NumberWords.Convert("123", 1, false) == "一百二十三", "數字對譯中文");
+        Check(NumberWords.Convert("12", 1, false) == "十二" && NumberWords.Convert("1003", 1, false) == "一千零三", "數字對譯中文零");
+        Check(NumberWords.Convert("100010", 1, false) == "十萬零一十" && NumberWords.Convert("10001", 1, false) == "一萬零一", "數字對譯中文萬");
+        Check(NumberWords.Convert("123", 2, false) == "壹佰貳拾參" && NumberWords.Convert("123", 2, true) == "壹佰贰拾叁", "數字對譯大楷");
+        Check(NumberWords.Convert("１２３", 3, false) == "１百２十３" && NumberWords.Convert("0.5", 1, false) == "零點五", "數字對譯全形");
+        Check(NumberWords.Convert("12a", 0, false) == null && NumberWords.Convert("1.", 0, false) == null, "數字對譯非數字");
         {
             var radicals = new Engine(data);
             radicals.RelMode = 3;

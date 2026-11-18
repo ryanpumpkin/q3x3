@@ -12,11 +12,13 @@ $out = Join-Path $PSScriptRoot 'Q9Rebuild.exe'
 $cscArgs = @(
     '/nologo', '/target:winexe', '/platform:x64', '/optimize+', '/define:Q9_TSF',
     '/reference:System.Windows.Forms.dll', '/reference:System.Drawing.dll', '/reference:System.Core.dll',
+    '/reference:System.Web.Extensions.dll',
     '/reference:WPF\PresentationCore.dll', '/reference:WPF\WindowsBase.dll', '/reference:System.Xaml.dll',
     "/out:$out",
     # 公開嘅 Big5-HKSCS 對照表，內置咗就唔使同 exe 放埋一齊
     "/resource:$PSScriptRoot\big5hkscs.map,big5hkscs.map",
-    "$PSScriptRoot\Engine.cs", "$PSScriptRoot\Panel.cs", "$PSScriptRoot\TsfProtocol.cs", "$PSScriptRoot\TsfHost.cs"
+    "$PSScriptRoot\Engine.cs", "$PSScriptRoot\Panel.cs", "$PSScriptRoot\TsfProtocol.cs", "$PSScriptRoot\TsfHost.cs",
+    "$PSScriptRoot\Lookup.cs"
 )
 
 

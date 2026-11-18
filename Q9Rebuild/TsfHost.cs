@@ -18,6 +18,8 @@ internal sealed class TsfHost : NativeWindow, IDisposable
         CreateHandle(new CreateParams { Caption = TsfProtocol.HostName, Parent = TsfProtocol.MessageOnly });
         panel.TextSink = Commit;
         panel.PausedChanged += SendMode;
+        panel.SelectionRequest = RequestSelection;
+        selectionTimeout.Tick += delegate { FinishSelection(null); };
         focusCheck.Tick += delegate { RefreshFocus(); };
         focusCheck.Start();
     }
@@ -114,6 +116,28 @@ internal sealed class TsfHost : NativeWindow, IDisposable
         else panel.ReportTsfDeliveryFailure();
     }
 
+    // 查: ask the focused TSF client for the selected text. It replies with a Selection message from an
+    // asynchronous edit session; null means no reply (the panel then falls back to the clipboard).
+    private Action<string> selectionDone;
+    private readonly Timer selectionTimeout = new Timer { Interval = 800 };
+
+    private void RequestSelection(Action<string> done)
+    {
+        FinishSelection(null);
+        if (client == IntPtr.Zero || blurred) { done(null); return; }
+        selectionDone = done;
+        selectionTimeout.Start();
+        if (!TsfProtocol.Send(client, Handle, TsfMessage.QuerySelection, "")) FinishSelection(null);
+    }
+
+    private void FinishSelection(string text)
+    {
+        selectionTimeout.Stop();
+        Action<string> done = selectionDone;
+        selectionDone = null;
+        if (done != null) done(text);
+    }
+
     // Tell the focused TSF client whether to show 中 (input on) or 英 (paused: keys pass through).
     private void SendMode()
     {
@@ -149,6 +173,12 @@ internal sealed class TsfHost : NativeWindow, IDisposable
         if (command == TsfMessage.Blur)
         {
             if (sender == client) blurred = true;
+            return;
+        }
+        if (command == TsfMessage.Selection)
+        {
+            if (sender == client) FinishSelection(payload);
+            message.Result = (IntPtr)1;
             return;
         }
         if (command == TsfMessage.ToggleMode)
