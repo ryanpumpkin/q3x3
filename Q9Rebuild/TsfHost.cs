@@ -17,6 +17,7 @@ internal sealed class TsfHost : NativeWindow, IDisposable
         this.panel = panel;
         CreateHandle(new CreateParams { Caption = TsfProtocol.HostName, Parent = TsfProtocol.MessageOnly });
         panel.TextSink = Commit;
+        panel.PausedChanged += SendMode;
         focusCheck.Tick += delegate { RefreshFocus(); };
         focusCheck.Start();
     }
@@ -113,6 +114,12 @@ internal sealed class TsfHost : NativeWindow, IDisposable
         else panel.ReportTsfDeliveryFailure();
     }
 
+    // Tell the focused TSF client whether to show 中 (input on) or 英 (paused: keys pass through).
+    private void SendMode()
+    {
+        if (client != IntPtr.Zero) TsfProtocol.Send(client, Handle, TsfMessage.Mode, panel.Paused ? "en" : "zh");
+    }
+
     private void SendText(string text)
     {
         bool sent = TsfProtocol.Send(client, Handle, TsfMessage.Commit, text);
@@ -144,10 +151,25 @@ internal sealed class TsfHost : NativeWindow, IDisposable
             if (sender == client) blurred = true;
             return;
         }
+        if (command == TsfMessage.ToggleMode)
+        {
+            // Clicking the taskbar button may briefly put the taskbar in front, so the current
+            // client is accepted without the foreground check.
+            if (sender == client || TsfProtocol.IsForeground(sender) && SetClient(sender))
+            {
+                panel.TogglePause();   // raises PausedChanged, which sends the new mode back
+                message.Result = (IntPtr)1;
+            }
+            return;
+        }
         if (!TsfProtocol.IsForeground(sender)) return;
         if (command == TsfMessage.Focus)
         {
-            if (SetClient(sender)) message.Result = (IntPtr)1;
+            if (SetClient(sender))
+            {
+                message.Result = (IntPtr)1;
+                SendMode();
+            }
             return;
         }
         if (command == TsfMessage.CommitFailed)

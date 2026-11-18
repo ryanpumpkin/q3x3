@@ -99,7 +99,7 @@ public interface ITfKeyEventSink
 }
 
 [ComImport, Guid("4ea48a35-60ae-446f-8fd6-e6a8d82459f7"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
-internal interface ITfSource
+public interface ITfSource
 {
     [PreserveSig] int AdviseSink(ref Guid interfaceId, [MarshalAs(UnmanagedType.IUnknown)] object sink, out uint cookie);
     [PreserveSig] int UnadviseSink(uint cookie);
@@ -159,6 +159,9 @@ public sealed class TsfInput : ITfTextInputProcessor, ITfKeyEventSink, ITfThread
             documentAdvised = true;
             Marshal.ThrowExceptionForHR(keys.AdviseKeyEventSink(clientId, this, true));
             keyAdvised = true;
+            AddModeButton();
+            try { TsfCompartments.Apply(manager, clientId, true); }
+            catch (Exception ex) { TsfProtocol.Log("compartments failed " + ex.Message); }
             TsfProtocol.Log("activate ok");
             return 0;
         }
@@ -170,8 +173,33 @@ public sealed class TsfInput : ITfTextInputProcessor, ITfKeyEventSink, ITfThread
         }
     }
 
+    private ITfLangBarItemMgr itemManager;
+    private TsfModeButton modeButton;
+
+    // The 中/英 button is a convenience: failing to add it must not stop the input method.
+    private void AddModeButton()
+    {
+        try
+        {
+            itemManager = manager as ITfLangBarItemMgr;
+            if (itemManager == null) return;
+            var button = new TsfModeButton(delegate { if (target != null) Notify(TsfMessage.ToggleMode); });
+            if (itemManager.AddItem(button) >= 0) modeButton = button;
+        }
+        catch (Exception ex) { TsfProtocol.Log("mode button failed " + ex.Message); }
+    }
+
+    private void RemoveModeButton()
+    {
+        try { if (itemManager != null && modeButton != null) itemManager.RemoveItem(modeButton); }
+        catch (Exception) { }
+        modeButton = null;
+        itemManager = null;
+    }
+
     public int Deactivate()
     {
+        RemoveModeButton();
         if (target != null) Notify(TsfMessage.Blur);
         if (keyAdvised) keys.UnadviseKeyEventSink(clientId);
         if (focusAdvised) source.UnadviseSink(focusCookie);
@@ -453,6 +481,14 @@ public sealed class TsfInput : ITfTextInputProcessor, ITfKeyEventSink, ITfThread
                 {
                     message.Result = owner.selected && TsfProtocol.IsForeground(Handle) && owner.HasDocumentFocus()
                         ? (IntPtr)1 : IntPtr.Zero;
+                    return;
+                }
+                if (command == TsfMessage.Mode)
+                {
+                    if (owner.modeButton != null) owner.modeButton.SetChinese(payload != "en");
+                    try { if (owner.manager != null) TsfCompartments.Apply(owner.manager, owner.clientId, payload != "en"); }
+                    catch (Exception) { }
+                    message.Result = (IntPtr)1;
                     return;
                 }
                 if (command == TsfMessage.Commit)

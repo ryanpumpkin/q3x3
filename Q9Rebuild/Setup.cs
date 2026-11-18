@@ -44,6 +44,22 @@ internal static class Registration
     internal static readonly string Tip = "0404:{" + TsfIdentity.ClassId + "}{" + TsfIdentity.ProfileId + "}";
     private const string ComKey = @"SOFTWARE\Classes\CLSID\{" + TsfIdentity.ClassId + "}";
 
+    // The 九 icon in the taskbar input indicator: icon resource 12 of the original q9w10b5tsf64.dll.
+    // The data-free build points at the installed original, so no vendor artwork is copied; the full
+    // build's Q9Rebuild.exe carries that icon itself (extracted by build.ps1 -Embed).
+    private static void ProfileIcon(string panel, out string icon, out uint index)
+    {
+#if Q9_FULL
+        icon = panel;
+        index = 0;
+#else
+        string original = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),
+            @"Q9W10B5\q9w10b5tsf64.dll");
+        if (File.Exists(original)) { icon = original; index = unchecked((uint)-12); }
+        else { icon = panel; index = 0; }
+#endif
+    }
+
     [DllImport("input.dll", CharSet = CharSet.Unicode, ExactSpelling = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     internal static extern bool InstallLayoutOrTip(string tip, uint flags);
@@ -96,8 +112,11 @@ internal static class Registration
                     Marshal.ThrowExceptionForHR(categories.RegisterCategory(ref clsid, ref category, ref clsid));
                 }
                 string name = TsfIdentity.DisplayName;
+                string icon;
+                uint iconIndex;
+                ProfileIcon(panel, out icon, out iconIndex);
                 Marshal.ThrowExceptionForHR(profiles.RegisterProfile(ref clsid, TsfIdentity.LanguageId, ref profile,
-                    name, (uint)name.Length, panel, (uint)panel.Length, 0, IntPtr.Zero, 0, true, 0));
+                    name, (uint)name.Length, icon, (uint)icon.Length, iconIndex, IntPtr.Zero, 0, true, 0));
             }
             finally
             {
@@ -148,10 +167,16 @@ internal static class Setup
 
     private static void Install()
     {
+#if !Q9_FULL
+        // The data-free build reads tables and skins from the installed original at runtime.
         string original = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "Q9W10B5");
         if (!File.Exists(Path.Combine(original, "q9w10b5tsf64.dll")) || !Directory.Exists(Path.Combine(original, "SKINready")))
             throw new DirectoryNotFoundException("請先安裝原版九方 W10，以提供碼表同皮膚。");
+#endif
         Directory.CreateDirectory(InstallPath);
+        // A running host keeps the old exe in memory; stop it so the new one is used.
+        // The input method starts a host again the next time an application needs one.
+        StopHosts();
         string suffix = "." + Guid.NewGuid().ToString("N");
         bool upgrading;
         using (var key = Registry.LocalMachine.OpenSubKey(UninstallKey)) upgrading = key != null;
@@ -245,9 +270,29 @@ internal static class Setup
         }
     }
 
+    private static void StopHosts()
+    {
+        string host = Path.Combine(InstallPath, "Q9Rebuild.exe");
+        foreach (Process process in Process.GetProcessesByName("Q9Rebuild"))
+        {
+            using (process)
+            {
+                try
+                {
+                    if (!string.Equals(process.MainModule.FileName, host, StringComparison.OrdinalIgnoreCase)) continue;
+                    process.Kill();
+                    process.WaitForExit(3000);
+                }
+                catch (InvalidOperationException) { }                       // already exited
+                catch (System.ComponentModel.Win32Exception) { }            // not accessible
+            }
+        }
+    }
+
     private static void Uninstall()
     {
         Registration.InstallLayoutOrTip(Registration.Tip, 1);
+        StopHosts();
         Register32(true);
         Registration.Apply(InstallPath, true);
         Registry.LocalMachine.DeleteSubKeyTree(UninstallKey, false);

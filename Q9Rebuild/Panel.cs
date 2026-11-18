@@ -125,6 +125,15 @@ internal sealed class Q9Panel : Form
         DoubleBuffered = true;
         ShowInTaskbar = false;
         StartPosition = FormStartPosition.Manual;
+        // Set the property as well as WS_EX_TOPMOST: WinForms re-applies TopMost (e.g. when a menu
+        // closes) and would otherwise drop the panel back into the normal z-order.
+        TopMost = true;
+        menu.Closed += delegate { KeepOnTop(); };
+        VisibleChanged += delegate { if (Visible) KeepOnTop(); };
+        // A never-activated topmost window can still end up below normal windows (seen in practice:
+        // WS_EX_TOPMOST set, z-order under Explorer and PowerShell). Check once a second.
+        topCheck.Tick += delegate { if (Visible && BelowNormalWindow()) KeepOnTop(); };
+        topCheck.Start();
         if (settings["Ver"] < 2) { settings["RelMode"] = 2; settings["Ver"] = 2; }   // 舊設定改用原版預設嘅動態關聯字
         engine.SetLang(settings["Lang"]);
         engine.SetMode(engine.SupportsMode(settings["Mode"]) ? settings["Mode"] : EnabledChineseModes().First());
@@ -151,6 +160,30 @@ internal sealed class Q9Panel : Form
     }
 
     protected override bool ShowWithoutActivation { get { return true; } }
+
+    [DllImport("user32.dll")]
+    private static extern bool SetWindowPos(IntPtr window, IntPtr after, int x, int y, int width, int height, uint flags);
+
+    // Back on top without moving, resizing or activating (SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE | SWP_NOOWNERZORDER).
+    private void KeepOnTop()
+    {
+        if (IsHandleCreated) SetWindowPos(Handle, new IntPtr(-1), 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0010 | 0x0200);
+    }
+
+    private readonly Timer topCheck = new Timer { Interval = 1000 };
+
+    [DllImport("user32.dll")] private static extern IntPtr GetWindow(IntPtr window, uint relation);
+    [DllImport("user32.dll")] private static extern bool IsWindowVisible(IntPtr window);
+    [DllImport("user32.dll")] private static extern int GetWindowLong(IntPtr window, int index);
+
+    // True when a visible window without WS_EX_TOPMOST sits above the panel in z-order.
+    private bool BelowNormalWindow()
+    {
+        if (!IsHandleCreated) return false;
+        for (IntPtr window = GetWindow(Handle, 3); window != IntPtr.Zero; window = GetWindow(window, 3))   // GW_HWNDPREV
+            if (IsWindowVisible(window) && (GetWindowLong(window, -20) & 0x8) == 0) return true;
+        return false;
+    }
 
     protected override void WndProc(ref Message m)
     {
@@ -870,10 +903,15 @@ internal sealed class Q9Panel : Form
     }
     internal void SetModeForPreview(int mode) { engine.SetMode(mode); }
 
-    private void TogglePause()
+    // Paused = English (keys pass straight to the application), shown as 英 by the TSF input-mode button.
+    internal bool Paused { get { return paused; } }
+    internal event Action PausedChanged;
+
+    internal void TogglePause()
     {
         paused = !paused;
         if (paused) Hide(); else { Native.ShowWindow(Handle, 4); Invalidate(); }
+        if (PausedChanged != null) PausedChanged();
     }
 
     // ---------- 鍵盤攔截 ----------
@@ -1191,7 +1229,7 @@ internal sealed class Q9Panel : Form
                 "關於", MessageBoxButtons.OK, MessageBoxIcon.Information);
         });
         Item(root, "結束", false, Close);
-        menu.Show(this, at);
+        ShowMenu(at);
     }
 
     private void OpenQuery(Point at)
@@ -1201,7 +1239,7 @@ internal sealed class Q9Panel : Form
         Item(menu.Items, "拼音檢字", false, delegate { OpenPinyinLookup("", false, target); });
         Item(menu.Items, "九方說明", false, OpenHelp);
         Item(menu.Items, "開啟自定資料夾", false, delegate { Directory.CreateDirectory(data.UserDir); Process.Start(data.UserDir); });
-        menu.Show(this, at);
+        ShowMenu(at);
     }
 
     private void OpenHelp()
@@ -1342,8 +1380,52 @@ internal sealed class Q9Panel : Form
             Item(menu.Items, "漢典", false,
                 delegate { Process.Start("https://www.zdic.net/hans/" + Uri.EscapeDataString(character)); });
         }
-        menu.Show(this, Point.Round(point));
+        ShowMenu(Point.Round(point));
         return true;
+    }
+
+    // The panel never takes activation (so typing stays in the application), and a menu owned by an
+    // inactive window is not closed by clicks elsewhere. Watch for an outside click or a foreground
+    // change while the menu is open and close it then.
+    private readonly Timer menuWatch = new Timer { Interval = 50 };
+    private IntPtr menuForeground;
+
+    [DllImport("user32.dll")] private static extern short GetAsyncKeyState(int key);
+    [DllImport("user32.dll")] private static extern IntPtr WindowFromPoint(Point point);
+    [DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(IntPtr window, out uint process);
+
+    private void ShowMenu(Point at)
+    {
+        menu.Show(this, at);
+        menuForeground = Native.GetForegroundWindow();
+        if (menuWatch.Tag == null)
+        {
+            menuWatch.Tag = true;
+            menuWatch.Tick += delegate { WatchMenu(); };
+        }
+        menuWatch.Start();
+    }
+
+    private void WatchMenu()
+    {
+        if (!menu.Visible) { menuWatch.Stop(); return; }
+        bool pressed = (GetAsyncKeyState(0x01) & 0x8000) != 0 || (GetAsyncKeyState(0x02) & 0x8000) != 0 ||
+            (GetAsyncKeyState(0x04) & 0x8000) != 0;
+        bool outside = pressed && !OwnWindow(WindowFromPoint(Cursor.Position));
+        IntPtr foreground = Native.GetForegroundWindow();
+        bool switched = foreground != menuForeground && !OwnWindow(foreground);
+        if (outside || switched)
+        {
+            menuWatch.Stop();
+            menu.Close(ToolStripDropDownCloseReason.AppClicked);
+        }
+    }
+
+    private static bool OwnWindow(IntPtr window)
+    {
+        uint process;
+        return window != IntPtr.Zero && GetWindowThreadProcessId(window, out process) != 0 &&
+            process == (uint)Process.GetCurrentProcess().Id;
     }
 
     private void OpenPinyinLookup(string query, bool cantonese, IntPtr target = default(IntPtr))

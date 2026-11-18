@@ -9,6 +9,8 @@
 - 數字鍵盤經 TSF 上字、彈出視窗出現同關閉後面板自動返嚟，用戶實機確認正常。
 - 管理員程式：UIPI 唔准普通主機回覆管理員程式，所以管理員程式入面嘅 DLL 會開一個獨立嘅管理員主機（子程序自動繼承權限，唔會再彈 UAC），名叫 `Q9Rebuild.TSF.85e6bb8f.admin`。DLL 只接受真係以管理員身分執行嘅主機，避免普通程式冒認嚟偷聽管理員視窗打嘅字。冇用 `ChangeWindowMessageFilterEx`，因為咁會俾任何普通程式送字入管理員視窗。兩個主機共用設定檔：失去焦點時儲存，取得焦點時如果另一個寫過新資料就重新讀取。用戶實機確認管理員視窗同管理員 PowerShell 上字正常。
 - 主控台（conhost）：主控台唔初始化 COM，TSF 只會載入有登記 `GUID_TFCAT_TIPCAP_COMLESS` 嘅輸入法（原版都有登記），所以安裝檔加咗呢個類別。另外主控台視窗對其他程序報告嘅擁有者係入面嘅程式（例如 powershell.exe），唔係真正行 TSF 嘅 conhost.exe，所以前景檢查遇到 `ConsoleWindowClass` 會接受父子程序關係。普通同管理員 PowerShell 實機上字正常。
+- 工作列輸入法圖示：輸入法圖示用原版 DLL 圖示資源 12（「九」）。無原版資料版直接指向已安裝原版 DLL，唔複製原版圖示；完整版由 `build.ps1 -Embed` 抽出做 `Q9Rebuild.exe` 圖示。工作列只會喺鍵盤開關分隔區（`GUID_COMPARTMENT_KEYBOARD_OPENCLOSE`）係「開」時先顯示輸入法圖示，否則顯示語言標籤「繁體」，所以 DLL 啟用時設為開。
+- 中／英掣：DLL 加入 `GUID_LBI_INPUTMODE` 工作列掣，圖示自己畫（跟工作列深淺色），唔用原版美術。「英」即面板暫停（按鍵直接交俾程式）。撳掣或者單撳 Shift 都會切換，主機會通知 DLL 更新掣同 `GUID_COMPARTMENT_KEYBOARD_INPUTMODE_CONVERSION`。用戶實機確認「九」同中／英都顯示。
 - 未驗證：Chrome／Edge、Word、Windows Terminal。之前已經載入過舊版 DLL 嘅程式要完全關閉再開先會用新版；記事本所有視窗共用一個程序。
 - 診斷：建立 `%LOCALAPPDATA%\Q9Rebuild\tsf-debug.log` 就會記錄 TSF 同主機每一步（包括打出嘅字），用完要刪除。程式入面嘅記錄經主機寫入，因為封裝程式（例如記事本）寫唔到真正嘅 AppData。由其他程式開嘅主機有時寫唔到記錄（原因未明），診斷時要由自己開主機。
 
