@@ -632,7 +632,7 @@ internal sealed class Q9Panel : Form
                 RectangleF grid = new RectangleF(input.X, input.Y, input.Width, input.Width * 688f / 682f);
                 Draw(g, image, grid);
             }
-            if (select && !choosingMethod && !engine.LookupSym && !engine.SymbolCode)
+            if ((select || engine.Kind == "pyhint") && !choosingMethod && !engine.LookupSym && !engine.SymbolCode)   // 拼音冇聲母直接揀字格都有三角形 (原版截圖 P90)
             {
                 // FUN_1800b0580 / FUN_1800b55c0：每格四角三角形，格邊內縮 GridLine*，邊長 CornerSize，
                 // 用 GDI Polygon (NULL_PEN) 填 0xC0C0C1

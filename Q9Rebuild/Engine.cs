@@ -712,7 +712,7 @@ internal sealed class Engine
     {
         if (Last.Length == 0) return null;
         string[] f = Data.Info(Lang, Last);
-        if (f == null) return null;   // 冇字資料 (符號等)：原版資料區乜都唔顯示 (原版截圖 P298)
+        if (f == null) return new string[0];   // 冇字資料 (符號等)：原版資料區乜都唔顯示 (原版截圖 P298)
         byte[] code = Dbcs.Encode(Lang, Last);
         Func<int, string> field = i => f != null && f.Length > i ? f[i] : "*";
         Func<int, string> first = i => field(i).Split(',')[0];
@@ -975,13 +975,19 @@ internal sealed class Engine
     // 動態關聯字 (FUN_1800b5e20)：清單第 i 個放「i+1」鍵（由左下開始）；
     // 第一頁 8 個關聯字，唔夠就用預設字補，第 9 格固定係預設字最後一個「的」。
     // 未有上一個字時顯示預設字，上下行對調 (你這好 喺最上)。
+    private string lastRelChar = "";
     private List<string> DynamicPage(string ch)
     {
         var defaults = Elements(DefaultRel[Lang]);
         if (ch.Length == 0)
             return defaults.Skip(6).Concat(defaults.Skip(3).Take(3)).Concat(defaults.Take(3)).ToList();
-        // 上咗符號 (唔係文字)：原版顯示預設字，唔對調上下行 (原版截圖 P298)
-        if (!char.IsLetter(ch, 0)) return defaults;
+        // 上咗符號 (唔係文字)：原版保留上一隻字嘅關聯字頁；之前未有就顯示預設字、唔對調上下行 (原版截圖 P298、P279)
+        if (!char.IsLetter(ch, 0))
+        {
+            if (lastRelChar.Length == 0) return defaults;
+            ch = lastRelChar;
+        }
+        lastRelChar = ch;
         var counts = Data.DynamicRelated(Lang, ch).Select(p => new KeyValuePair<string, int>(p.Key, p.Value)).ToList();
         Dictionary<string, int> learned;
         if (learnedRel.TryGetValue(Lang + ":" + ch, out learned))
@@ -1116,7 +1122,7 @@ internal sealed class Engine
         NoChar = false;
         if (Mode == Number) return false;
         // 字形「未有字」之後原版已經清碼 (亦冇關聯字)：下一個鍵當靜止時處理，0 = 標點 (原版截圖 8250)
-        if (wasNoChar && Mode == Glyph && State == St.Compose && k != '' && k != '.')
+        if (wasNoChar && (Mode == Glyph || Mode == Pinyin) && State == St.Compose && k != '' && k != '.')   // 拼音一樣 (原版截圖 6276)
         {
             Buf = ""; State = St.Idle;
             SetList("code", new List<string>(), false);
