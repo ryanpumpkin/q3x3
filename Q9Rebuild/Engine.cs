@@ -151,6 +151,15 @@ internal sealed class Tbl
         return true;
     }
 
+    internal byte[] RawRow(int code)
+    {
+        if (code < 1 || code >= n - 1) return new byte[0];
+        int a = n * 2 + Idx(code) * 2, e = Math.Min(n * 2 + Idx(code + 1) * 2, d.Length);
+        var r = new byte[Math.Max(0, e - a)];
+        Buffer.BlockCopy(d, a, r, 0, r.Length);
+        return r;
+    }
+
     internal List<string> Get(int code)
     {
         var list = new List<string>();
@@ -1320,10 +1329,13 @@ internal sealed class Engine
     private bool SelectKey(char k)
     {
         if (Kind == "lookup-menu" && k >= '1' && k <= '9') return ChooseLookup(k - '0');
-        if ((Kind == "stroke-count" || Kind == "radical-count") && k >= '1' && k <= '9')
+        if (Kind == "stroke-count" && k >= '1' && k <= '9') return OpenLookupRow("STDATA", off + k - '0');
+        if (Kind == "radical-stroke" && k >= '1' && k <= '9') return OpenRadicals(k - '0');
+        if (Kind == "radical-count" && k >= '1' && k <= '9')
         {
-            int row = off + k - '0';
-            return OpenLookupRow(Kind == "stroke-count" ? "STDATA" : "RADDATA", row);
+            int i = off + k - '1';
+            if (i >= radicalIndex.Count) { Beep(); return true; }
+            return OpenLookupRow("RADDATA", 10 + radicalIndex[i]);
         }
         if ((Kind == "shape-extra" || Kind == "sound-extra") && k >= '0' && k <= '9')
             return FilterExtra(Kind == "shape-extra", k - '0');
@@ -1440,12 +1452,40 @@ internal sealed class Engine
         }
         else if (key == 3)
         {
-            var table = Data.Table(Lang, "RADDATA");
-            var radicals = Enumerable.Range(1, 999).Select(i => table.Get(i).FirstOrDefault()).ToList();
-            int last = radicals.FindLastIndex(ch => ch != null);
-            if (last >= 0) OpenTexts("radical-count", radicals.Take(last + 1).ToList(), "未有部首");
+            // 九方部首筆劃檢字：先揀部首第一筆 (畫面同字形靜止一樣，FUN_1800b0970)
+            SetList("radical-stroke", new List<string>(), false);
+            State = St.Select;
         }
         else return OpenLookupRow("SBDATA", key);
+        return true;
+    }
+
+    // RADDATA 第 1-9 行：該筆開頭嘅部首「偽碼」(A4A1 起)，索引 = (首位元組 - 0xA4) * 0x5E + 次位元組 - 0xA1；
+    // 部首字本身係 FUN_1800b0970 入面嘅常數陣列；揀咗第 i 個部首 = RADDATA 第 10 + i 行
+    internal const string RadicalGlyphs = "扌支寸十土士耒赤走甘皮老斗木艹麥黃鼓青革韋車弋犭戈女尢廾力又大爻屮山己凵匚冂冖几网臣長禸肉用彐月殳鬥鬯黽風馬髟門文方宀广心丶亠冫衤礻羊疒穴立火玄鹿麻音首高言辛齊龍阝子巛卩厶阝乙刀癶匕疋矛糸辶爿幺廴弓羽飛田皿目日曰毋口囗邑尸骨黑鼎貝足里臼艮見鼠厂工二一牙玉瓦歹干旡至而耳非石雨豕辰酉覀豆鬲面頁韭巾亅卜丨丿小米止比水虍虫黹聿隶鹵齒戶谷八父人儿入金食彡彳攵夂夊夕勹片牛瓜氏气爪斤欠毛自舌舛禾竹缶生白矢身釆阜隹行角豸舟色血黍鼻龜龠鬼魚鳥香";
+    private List<int> radicalIndex = new List<int>();
+
+    internal int RadicalIndexAt(int key)
+    {
+        int i = off + key - 1;
+        return Kind == "radical-count" && i >= 0 && i < radicalIndex.Count ? radicalIndex[i] : -1;
+    }
+
+    private bool OpenRadicals(int stroke)
+    {
+        var bytes = Data.Table(Lang, "RADDATA").RawRow(stroke);
+        radicalIndex = new List<int>();
+        for (int p = 0; p + 1 < bytes.Length; p += 2)
+        {
+            int idx = (bytes[p] - 0xA4) * 0x5E + bytes[p + 1] - 0xA1;
+            if (idx >= 0 && idx < RadicalGlyphs.Length) radicalIndex.Add(idx);
+        }
+        if (radicalIndex.Count == 0) { Beep(); return true; }
+        var shown = radicalIndex.Select(i => RadicalGlyphs[i].ToString()).ToList();
+        var keep = radicalIndex;
+        SetList("radical-count", shown, false);
+        radicalIndex = keep;
+        State = St.Select;
         return true;
     }
 
@@ -1578,7 +1618,7 @@ internal sealed class Engine
             if (State == St.Select)
             {
                 if (Kind == "shape-extra") return Lang == 0 ? "ShapeExtra.png" : "ShapeExtra_GB.png";
-                return Kind == "punct" ? "Q9_P.png" : Kind == "emojicat" ? "Q9_emoji.png" : null;
+                return Kind == "punct" ? "Q9_P.png" : Kind == "emojicat" ? "Q9_emoji.png" : Kind == "radical-stroke" ? "Q9_0.png" : null;
             }
             if (NoChar)
                 return Mode == Glyph ? "Q9_N.png" : Mode == Stroke ? "q9stimNone.png" : Mode == Zhuyin ? "CYNONE.png" : "PYNONE.png";
