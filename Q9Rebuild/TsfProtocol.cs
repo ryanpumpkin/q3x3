@@ -2,7 +2,7 @@ using System;
 using System.Runtime.InteropServices;
 using System.Windows.Forms;
 
-internal enum TsfMessage { Focus = 1, Blur, TestDown, TestUp, Down, Up, Commit, Ping, CommitFailed }
+internal enum TsfMessage { Focus = 1, Blur, TestDown, TestUp, Down, Up, Commit, Ping, CommitFailed, Log }
 
 internal static class TsfProtocol
 {
@@ -31,15 +31,42 @@ internal static class TsfProtocol
     // Diagnostic trace: written only while %LOCALAPPDATA%\Q9Rebuild\tsf-debug.log already exists.
     private static readonly string LogPath = System.IO.Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), @"Q9Rebuild\tsf-debug.log");
+    private static readonly string ProcessName = System.Diagnostics.Process.GetCurrentProcess().ProcessName;
+
     internal static void Log(string line)
+    {
+        try { if (!System.IO.File.Exists(LogPath)) return; }
+        catch (Exception) { return; }
+        line = ProcessName + " " + line;
+        // Inside applications the file may be unwritable (packaged apps virtualize AppData),
+        // so the TSF side hands its trace to the host, which writes the real file.
+        if (!string.Equals(ProcessName, "Q9Rebuild", StringComparison.OrdinalIgnoreCase))
+        {
+            IntPtr host = FindHost();
+            if (host != IntPtr.Zero && Send(host, new IntPtr(1), TsfMessage.Log, line)) return;
+        }
+        WriteLog(line);
+    }
+
+    internal static void WriteLog(string line)
     {
         try
         {
             if (!System.IO.File.Exists(LogPath)) return;
-            System.IO.File.AppendAllText(LogPath, DateTime.Now.ToString("HH:mm:ss.fff ") +
-                System.Diagnostics.Process.GetCurrentProcess().ProcessName + " " + line + Environment.NewLine);
+            // Packaged apps (e.g. Windows 11 Notepad) write AppData through a per-package copy
+            // that lacks this folder; create it so their trace lands in the package's LocalCache.
+            System.IO.Directory.CreateDirectory(System.IO.Path.GetDirectoryName(LogPath));
+            System.IO.File.AppendAllText(LogPath, DateTime.Now.ToString("HH:mm:ss.fff ") + line + Environment.NewLine);
         }
         catch (Exception) { }
+    }
+
+    internal static string DescribeForeground(IntPtr window)
+    {
+        uint process, foregroundProcess;
+        uint thread = GetWindowThreadProcessId(window, out process);
+        uint foregroundThread = GetWindowThreadProcessId(GetForegroundWindow(), out foregroundProcess);
+        return "thread=" + thread + " fgThread=" + foregroundThread + " fgProcess=" + foregroundProcess;
     }
 
     internal static IntPtr FindHost() { return FindWindowEx(MessageOnly, IntPtr.Zero, null, HostName); }
@@ -47,9 +74,12 @@ internal static class TsfProtocol
 
     internal static bool IsForeground(IntPtr window)
     {
-        uint ignored;
-        uint thread = GetWindowThreadProcessId(window, out ignored);
-        return thread != 0 && thread == GetWindowThreadProcessId(GetForegroundWindow(), out ignored);
+        // Compare processes, not threads: Windows 11 Notepad runs TSF on a different thread
+        // from the window that owns foreground.
+        uint process, foreground;
+        if (GetWindowThreadProcessId(window, out process) == 0 || process == 0) return false;
+        GetWindowThreadProcessId(GetForegroundWindow(), out foreground);
+        return process == foreground;
     }
 
     internal static bool Send(IntPtr target, IntPtr sender, TsfMessage command, string payload)

@@ -73,6 +73,15 @@ internal sealed class TsfHost : NativeWindow, IDisposable
                 SetClient(client);
                 return;
             }
+            // Focus returned to another window of the same document thread (e.g. a dialog closed).
+            // TSF reported the document focus before the window change, so confirm with the client
+            // instead of hiding the panel until the next key.
+            IntPtr foreground = TsfProtocol.Foreground;
+            if (!blurred && foreground != IntPtr.Zero && TsfProtocol.Send(client, Handle, TsfMessage.Ping, ""))
+            {
+                editor = foreground;
+                return;
+            }
             SetClient(IntPtr.Zero);
         }
     }
@@ -122,6 +131,12 @@ internal sealed class TsfHost : NativeWindow, IDisposable
         }
         message.Result = IntPtr.Zero;
         var sender = message.WParam;
+        if (command == TsfMessage.Log)
+        {
+            TsfProtocol.WriteLog(payload);
+            message.Result = (IntPtr)1;
+            return;
+        }
         if (command != TsfMessage.TestUp && command != TsfMessage.Up)
             TsfProtocol.Log("host got " + command + " fg=" + TsfProtocol.IsForeground(sender) + " isClient=" + (sender == client));
         if (command == TsfMessage.Blur)

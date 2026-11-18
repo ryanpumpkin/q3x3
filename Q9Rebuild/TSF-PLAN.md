@@ -5,8 +5,9 @@
 - `Q9Setup.exe` 實機安裝成功，32／64 位元 COM 同 TSF 設定檔登記好，「九方 W10 重建版」出現喺繁體中文輸入法清單。
 - WinForms 文字框（新開程序）用滑鼠點面板揀字，實際上字成功。
 - 修正咗三個問題：CodeBase 路徑唔可以用 `%20`（CLR 唔解碼）；`InsertTextAtSelection` 唔可以用 `TF_IAS_NOQUERY`（TextInputFramework.dll 報告改動時讀空範圍而崩潰），改用 0 再將游標移到字尾；滑鼠揀字唔喺主機嘅跨執行緒 SendMessage 入面直接編輯，改為排隊再用非同步編輯工作階段。
-- 未驗證：數字鍵盤經 TSF 上字、記事本、Chrome／Edge、Word、管理員程式。之前已經載入過舊版 DLL 嘅程式要重新開先會用新版。
-- 診斷：建立 `%LOCALAPPDATA%\Q9Rebuild\tsf-debug.log` 就會記錄 TSF 同主機每一步（包括打出嘅字），用完要刪除。
+- Claude、Codex 同 Windows 11 記事本實機上字成功。記事本嘅 TSF 執行緒同前景視窗唔係同一條，所以前景檢查改為比較程序，唔再比較執行緒。
+- 未驗證：數字鍵盤經 TSF 上字、Chrome／Edge、Word、管理員程式（UIPI 會擋主機回覆，預期唔得）。之前已經載入過舊版 DLL 嘅程式要完全關閉再開先會用新版；記事本所有視窗共用一個程序。
+- 診斷：建立 `%LOCALAPPDATA%\Q9Rebuild\tsf-debug.log` 就會記錄 TSF 同主機每一步（包括打出嘅字），用完要刪除。程式入面嘅記錄經主機寫入，因為封裝程式（例如記事本）寫唔到真正嘅 AppData。
 
 ## 目標
 

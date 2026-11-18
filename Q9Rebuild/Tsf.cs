@@ -112,15 +112,25 @@ public interface ITfThreadFocusSink
     [PreserveSig] int OnKillThreadFocus();
 }
 
+[ComImport, Guid("aa80e80e-2021-11d2-93e0-0060b067b86e"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+public interface ITfThreadMgrEventSink
+{
+    [PreserveSig] int OnInitDocumentMgr(IntPtr document);
+    [PreserveSig] int OnUninitDocumentMgr(IntPtr document);
+    [PreserveSig] int OnSetFocus(IntPtr focus, IntPtr previous);
+    [PreserveSig] int OnPushContext(IntPtr context);
+    [PreserveSig] int OnPopContext(IntPtr context);
+}
+
 [ComVisible(true), ClassInterface(ClassInterfaceType.None)]
 [Guid(TsfIdentity.ClassId)]
-public sealed class TsfInput : ITfTextInputProcessor, ITfKeyEventSink, ITfThreadFocusSink
+public sealed class TsfInput : ITfTextInputProcessor, ITfKeyEventSink, ITfThreadFocusSink, ITfThreadMgrEventSink
 {
     private ITfThreadMgr manager;
     private ITfKeystrokeMgr keys;
     private ITfSource source;
-    private uint clientId, focusCookie;
-    private bool keyAdvised, focusAdvised, selected;
+    private uint clientId, focusCookie, documentCookie;
+    private bool keyAdvised, focusAdvised, documentAdvised, selected;
     private DateTime nextLaunch;
     private Timer focusRetry;
     private Target target;
@@ -128,6 +138,7 @@ public sealed class TsfInput : ITfTextInputProcessor, ITfKeyEventSink, ITfThread
 
     public int Activate(ITfThreadMgr threadManager, uint id)
     {
+        TsfProtocol.Log("activate start thread=" + GetCurrentThreadId());
         try
         {
             // The standalone panel must remain focused on the application's own input context.
@@ -141,6 +152,11 @@ public sealed class TsfInput : ITfTextInputProcessor, ITfKeyEventSink, ITfThread
             Guid iid = typeof(ITfThreadFocusSink).GUID;
             Marshal.ThrowExceptionForHR(source.AdviseSink(ref iid, this, out focusCookie));
             focusAdvised = true;
+            // Document focus changes inside an already focused thread (a new window or dialog on the
+            // same UI thread) raise no thread focus event, so watch them as well.
+            Guid documentIid = typeof(ITfThreadMgrEventSink).GUID;
+            Marshal.ThrowExceptionForHR(source.AdviseSink(ref documentIid, this, out documentCookie));
+            documentAdvised = true;
             Marshal.ThrowExceptionForHR(keys.AdviseKeyEventSink(clientId, this, true));
             keyAdvised = true;
             TsfProtocol.Log("activate ok");
@@ -159,7 +175,8 @@ public sealed class TsfInput : ITfTextInputProcessor, ITfKeyEventSink, ITfThread
         if (target != null) Notify(TsfMessage.Blur);
         if (keyAdvised) keys.UnadviseKeyEventSink(clientId);
         if (focusAdvised) source.UnadviseSink(focusCookie);
-        keyAdvised = focusAdvised = selected = false;
+        if (documentAdvised) source.UnadviseSink(documentCookie);
+        keyAdvised = focusAdvised = documentAdvised = selected = false;
         pending.Length = 0;
         StopRetry();
         nextLaunch = DateTime.MinValue;
@@ -181,12 +198,45 @@ public sealed class TsfInput : ITfTextInputProcessor, ITfKeyEventSink, ITfThread
 
     public int OnSetThreadFocus()
     {
-        if (target != null && selected && TsfProtocol.IsForeground(target.Handle))
+        TsfProtocol.Log("OnSetThreadFocus selected=" + selected + " target=" + (target != null) +
+            (target != null ? " " + TsfProtocol.DescribeForeground(target.Handle) : "") + " host=" + TsfProtocol.FindHost());
+        ClaimFocus();
+        return 0;
+    }
+
+    // ITfThreadMgrEventSink
+    public int OnInitDocumentMgr(IntPtr document) { return 0; }
+    public int OnUninitDocumentMgr(IntPtr document) { return 0; }
+    public int OnPushContext(IntPtr context) { return 0; }
+    public int OnPopContext(IntPtr context) { return 0; }
+
+    int ITfThreadMgrEventSink.OnSetFocus(IntPtr focus, IntPtr previous)
+    {
+        TsfProtocol.Log("document focus " + (focus != IntPtr.Zero));
+        if (focus != IntPtr.Zero) ClaimFocus();
+        return 0;
+    }
+
+    // The focus check compares processes, so also require that this thread owns a focused document.
+    private bool HasDocumentFocus()
+    {
+        ITfDocumentMgr document;
+        if (manager == null || manager.GetFocus(out document) < 0 || document == null) return false;
+        Marshal.ReleaseComObject(document);
+        return true;
+    }
+
+    // Tell the host this thread's document has focus. A newly created window often is not
+    // foreground yet when TSF reports focus, so keep retrying briefly instead of giving up.
+    private void ClaimFocus()
+    {
+        if (target == null || !selected) return;
+        if (TsfProtocol.IsForeground(target.Handle))
         {
             EnsureHost();
-            if (!Notify(TsfMessage.Focus)) RetryFocus();
+            if (Notify(TsfMessage.Focus)) { StopRetry(); return; }
         }
-        return 0;
+        RetryFocus();
     }
 
     public int OnKillThreadFocus()
@@ -222,8 +272,11 @@ public sealed class TsfInput : ITfTextInputProcessor, ITfKeyEventSink, ITfThread
         focusRetry = new Timer { Interval = 100 };
         focusRetry.Tick += delegate
         {
-            if (target == null || !selected || !TsfProtocol.IsForeground(target.Handle) ||
-                DateTime.UtcNow >= deadline || Notify(TsfMessage.Focus)) StopRetry();
+            if (target == null || !selected || DateTime.UtcNow >= deadline) { StopRetry(); return; }
+            // Wait for the window to come to the foreground, then hand focus to the host.
+            if (!TsfProtocol.IsForeground(target.Handle)) return;
+            EnsureHost();
+            if (Notify(TsfMessage.Focus)) StopRetry();
         };
         focusRetry.Start();
     }
@@ -305,6 +358,9 @@ public sealed class TsfInput : ITfTextInputProcessor, ITfKeyEventSink, ITfThread
         if (first) PostMessage(target.Handle, FlushMessage, IntPtr.Zero, IntPtr.Zero);
         return true;
     }
+
+    [DllImport("kernel32.dll")]
+    private static extern uint GetCurrentThreadId();
 
     internal const int FlushMessage = 0x8000 + 0x51;   // WM_APP + 0x51
     private readonly StringBuilder pending = new StringBuilder();
@@ -395,7 +451,8 @@ public sealed class TsfInput : ITfTextInputProcessor, ITfKeyEventSink, ITfThread
             {
                 if (command == TsfMessage.Ping)
                 {
-                    message.Result = owner.selected && TsfProtocol.IsForeground(Handle) ? (IntPtr)1 : IntPtr.Zero;
+                    message.Result = owner.selected && TsfProtocol.IsForeground(Handle) && owner.HasDocumentFocus()
+                        ? (IntPtr)1 : IntPtr.Zero;
                     return;
                 }
                 if (command == TsfMessage.Commit)
